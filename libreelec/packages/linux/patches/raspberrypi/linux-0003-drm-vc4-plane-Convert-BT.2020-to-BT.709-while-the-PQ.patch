@@ -1,0 +1,104 @@
+From 97f4b3a534ac2e9186c6c0fb4281a9631b9fbaeb Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 19:03:31 +0000
+Subject: [PATCH 3/3] drm/vc4: plane: Convert BT.2020 to BT.709 while the PQ to
+ SDR curve is on
+
+PQ video uses BT.2020 primaries, while the curve feeds a BT.709 display.
+The HVS has no linear stage, so while the curve is on, YCbCr planes get a
+BT.2020 limited range matrix with an approximate gamut conversion fitted
+in the PQ domain. On frames from UHD Blu-ray films, its mean CIE76 error
+against the exact conversion in linear light is 1.0, against 4.4 without
+the conversion.
+
+The matrix ignores COLOR_ENCODING, which userspace may leave at BT.709
+when the decoder does not report the colour space. hvs5_pq_gamut turns it
+off and hvs5_pq_csc holds its words.
+---
+ drivers/gpu/drm/vc4/vc4_plane.c | 49 +++++++++++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/drivers/gpu/drm/vc4/vc4_plane.c b/drivers/gpu/drm/vc4/vc4_plane.c
+index eb3d242..37473e6 100644
+--- a/drivers/gpu/drm/vc4/vc4_plane.c
++++ b/drivers/gpu/drm/vc4/vc4_plane.c
+@@ -15,6 +15,8 @@
+  * into the region of the HVS that it has allocated for us.
+  */
+ 
++#include <linux/moduleparam.h>
++
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_atomic_uapi.h>
+@@ -1355,6 +1357,44 @@ static u32 vc4_hvs6_get_alpha_mask_mode(struct drm_plane_state *state)
+ 	return VC4_SET_FIELD(SCALER6_CTL0_ALPHA_MASK_NONE, SCALER6_CTL0_ALPHA_MASK);
+ }
+ 
++/*
++ * BT.2020 limited range YCbCr to RGB with an approximate BT.2020 to BT.709
++ * gamut conversion, fitted in the PQ domain. Used only while the HVS5 PQ
++ * to SDR curve is active; the words can be overridden at runtime.
++ *
++ * The coefficients fit the range of the CSC words (-1 to just under 3,
++ * see vc4_regs.h). Cb to R and Cr to B are not used.
++ *
++ * Cr to R 2.551, Cr to G -0.95, Cb to G -0.064, Cb to B 2.662, Y 1.164.
++ *
++ * PQ content is BT.2020 in practice, so the matrix ignores COLOR_ENCODING,
++ * which userspace may leave at BT.709 when the decoder does not report
++ * the colour space.
++ */
++static bool hvs5_pq_gamut = true;
++module_param(hvs5_pq_gamut, bool, 0644);
++MODULE_PARM_DESC(hvs5_pq_gamut,
++		 "BCM2711: BT.2020 to BT.709 gamut matrix with the PQ to SDR curve");
++
++static uint hvs5_pq_csc[3] = { 0x00f00000, 0xfc30d4a8, 0x000a36a9 };
++module_param_array(hvs5_pq_csc, uint, NULL, 0644);
++MODULE_PARM_DESC(hvs5_pq_csc, "BCM2711: CSC words used with hvs5_pq_gamut");
++
++static bool vc4_plane_pq_to_sdr(struct drm_plane_state *state)
++{
++	struct drm_crtc_state *crtc_state = NULL;
++
++	if (!state->crtc)
++		return false;
++	if (state->state)
++		crtc_state = drm_atomic_get_new_crtc_state(state->state,
++							   state->crtc);
++	if (!crtc_state)
++		crtc_state = state->crtc->state;
++
++	return crtc_state && to_vc4_crtc_state(crtc_state)->pq_to_sdr;
++}
++
+ /* Writes out a full display list for an active plane to the plane's
+  * private dlist state.
+  */
+@@ -1788,6 +1828,7 @@ static int vc4_plane_mode_set(struct drm_plane *plane,
+ 		enum drm_color_encoding color_encoding = state->color_encoding;
+ 		enum drm_color_range color_range = state->color_range;
+ 		const u32 *ccm;
++		u32 pq_ccm[3];
+ 
+ 		if (color_encoding >= DRM_COLOR_ENCODING_MAX)
+ 			color_encoding = DRM_COLOR_YCBCR_BT601;
+@@ -1795,6 +1836,14 @@ static int vc4_plane_mode_set(struct drm_plane *plane,
+ 			color_range = DRM_COLOR_YCBCR_LIMITED_RANGE;
+ 
+ 		ccm = colorspace_coeffs[color_range][color_encoding];
++		if (vc4->gen == VC4_GEN_5 && READ_ONCE(hvs5_pq_gamut) &&
++		    color_range == DRM_COLOR_YCBCR_LIMITED_RANGE &&
++		    vc4_plane_pq_to_sdr(state)) {
++			pq_ccm[0] = READ_ONCE(hvs5_pq_csc[0]);
++			pq_ccm[1] = READ_ONCE(hvs5_pq_csc[1]);
++			pq_ccm[2] = READ_ONCE(hvs5_pq_csc[2]);
++			ccm = pq_ccm;
++		}
+ 
+ 		vc4_dlist_write(vc4_state, ccm[0]);
+ 		vc4_dlist_write(vc4_state, ccm[1]);
+-- 
+2.53.0
+

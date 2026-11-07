@@ -1,0 +1,365 @@
+From 23ad442a50fb032d985a223f2d4f4ab4e886fab4 Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 09:31:37 +0000
+Subject: [PATCH] [GBM] Composite the GUI through the inverse Raspberry Pi 4
+ HVS curve
+
+The HVS gamma block works on the composited output, so the curve also
+maps the GUI and brightens its mid tones. Read the curve from
+hvs5_pq_pwl, invert it into the LUT of the GLES GUI composite shader and
+composite the GUI through it while the curve is on, so menus, OSD and
+text subtitles look as in SDR. If that is not possible, the curve stays
+off.
+---
+ .../shaders/GLES/2.0/gles_gui_composite.frag  | 16 +++++
+ .../HwDecRender/RendererDRMPRIME.cpp          | 31 +++++---
+ .../HwDecRender/RendererDRMPRIME.h            |  1 +
+ .../rendering/gles/GuiCompositeShaderGLES.cpp | 30 ++++++++
+ xbmc/rendering/gles/GuiCompositeShaderGLES.h  | 10 ++-
+ xbmc/windowing/gbm/WinSystemGbm.cpp           | 72 +++++++++++++++++++
+ xbmc/windowing/gbm/WinSystemGbm.h             |  6 ++
+ .../windowing/gbm/WinSystemGbmGLESContext.cpp |  7 +-
+ 8 files changed, 160 insertions(+), 13 deletions(-)
+
+diff --git a/system/shaders/GLES/2.0/gles_gui_composite.frag b/system/shaders/GLES/2.0/gles_gui_composite.frag
+index 4cfd4fd..2076418 100644
+--- a/system/shaders/GLES/2.0/gles_gui_composite.frag
++++ b/system/shaders/GLES/2.0/gles_gui_composite.frag
+@@ -15,6 +15,8 @@ uniform sampler2D u_lutDegamma; // sRGB -> linear LUT (IEC 61966-2-1)
+ uniform sampler2D u_lutTF;      // linear -> PQ LUT (1024 entries, sdrPeak baked in)
+ uniform float u_ootfGamma;      // HLG: OOTF gamma (1.2 for BT.2100 1000-nit ref)
+                                 // PQ: 0.0 (use LUT path instead)
++uniform float u_hvsCurve;       // 1.0: u_lutTF is the inverse of the Raspberry Pi 4
++                                // HVS curve applied after the planes are blended
+ 
+ // BT.709 -> BT.2020 color space conversion matrix (applied in linear light)
+ const mat3 bt709_to_bt2020 = mat3(
+@@ -33,6 +35,20 @@ void main()
+   if (gui.a == 0.0)
+     discard;
+ 
++  if (u_hvsCurve > 0.0)
++  {
++    // The GUI stays SDR, only the curve the display hardware applies is undone.
++    vec3 sdr = gui.rgb;
++#ifdef KODI_LIMITED_RANGE
++    sdr = sdr * ((235.0 - 16.0) / 255.0) + (16.0 / 255.0);
++#endif
++    gl_FragColor = vec4(texture2D(u_lutTF, vec2(sdr.r, 0.5)).r,
++                        texture2D(u_lutTF, vec2(sdr.g, 0.5)).r,
++                        texture2D(u_lutTF, vec2(sdr.b, 0.5)).r,
++                        gui.a);
++    return;
++  }
++
+   // sRGB -> linear via LUT (IEC 61966-2-1 EOTF, replaces inline pow)
+   vec3 linear = vec3(
+     texture2D(u_lutDegamma, vec2(gui.r, 0.5)).r,
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+index 792c1b5..83e3e87 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+@@ -310,18 +310,18 @@ void CRendererDRMPRIME::ConfigureHDR()
+   if (!winSystem)
+     return;
+ 
+-  const bool passthroughHDR = winSystem->SetHDR(&m_picture);
++  m_passthroughHDR = winSystem->SetHDR(&m_picture);
+   CLog::Log(LOGDEBUG, "CRendererDRMPRIME::Configure: HDR passthrough: {}",
+-            passthroughHDR ? "on" : "off");
++            m_passthroughHDR ? "on" : "off");
+ 
+-  const bool hdrFboActive = passthroughHDR && winSystem->SetGuiCompositing(m_picture.color_transfer);
+-  if (passthroughHDR && !hdrFboActive)
++  const bool hdrFboActive =
++      m_passthroughHDR && winSystem->SetGuiCompositing(m_picture.color_transfer);
++  if (m_passthroughHDR && !hdrFboActive)
+     CLog::Log(LOGWARNING, "CRendererDRMPRIME::Configure: HDR passthrough active but "
+                           "GUI compositing not supported by windowing system");
+-  else if (!passthroughHDR && winSystem->IsHdrComposite())
+-    winSystem->SetGuiCompositing(false);
+ 
+-  m_pqWithoutHdr = !passthroughHDR && m_picture.color_transfer == AVCOL_TRC_SMPTE2084;
++  // UpdateToneMapping() sets up the GUI compositing without passthrough
++  m_pqWithoutHdr = !m_passthroughHDR && m_picture.color_transfer == AVCOL_TRC_SMPTE2084;
+   m_colorimetrySet = false;
+   UpdateToneMapping();
+ }
+@@ -330,11 +330,24 @@ void CRendererDRMPRIME::UpdateToneMapping()
+ {
+   auto* winSystem = static_cast<CWinSystemGbm*>(CServiceBroker::GetWinSystem());
+ 
+-  const bool enable =
+-      m_pqWithoutHdr && m_toneMappingAllowed && winSystem->SupportsHwToneMapping();
++  bool enable = m_pqWithoutHdr && m_toneMappingAllowed && winSystem->SupportsHwToneMapping();
+   if (enable == m_hwToneMapping && m_colorimetrySet)
+     return;
+ 
++  // keep the GUI as it is without the curve, and the curve off when the GUI
++  // cannot be composited through its inverse
++  if (!m_passthroughHDR)
++  {
++    const int transfer = enable ? CWinSystemGbm::GUI_COMPOSITE_HVS_CURVE : 0;
++    if (!winSystem->SetGuiCompositing(transfer) && enable)
++    {
++      CLog::Log(LOGWARNING,
++                "CRendererDRMPRIME: GUI compositing for the HVS curve not available, "
++                "tone mapping off");
++      enable = false;
++    }
++  }
++
+   // the curve outputs BT.709
+   winSystem->SetColorimetry(enable ? nullptr : &m_picture);
+   m_colorimetrySet = true;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+index 30e3de2..397275e 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+@@ -58,6 +58,7 @@ private:
+   VideoPicture m_picture;
+   bool m_hdrDisplay = false;
+   bool m_colorimetrySet = false;
++  bool m_passthroughHDR = false;
+   bool m_pqWithoutHdr = false;
+   bool m_toneMappingAllowed = false;
+   bool m_hwToneMapping = false;
+diff --git a/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp b/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp
+index 77dc713..23ad39e 100644
+--- a/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp
++++ b/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp
+@@ -63,6 +63,7 @@ void CGuiCompositeShaderGLES::OnCompiledAndLinked()
+   m_hLutTF = glGetUniformLocation(ProgramHandle(), "u_lutTF");
+   m_hProj = glGetUniformLocation(ProgramHandle(), "u_proj");
+   m_hOotfGamma = glGetUniformLocation(ProgramHandle(), "u_ootfGamma");
++  m_hHvsCurve = glGetUniformLocation(ProgramHandle(), "u_hvsCurve");
+   glUseProgram(ProgramHandle());
+   glUniform1i(m_hSamp, 0);
+   glUniform1i(m_hLutDegamma, 1);
+@@ -76,6 +77,7 @@ bool CGuiCompositeShaderGLES::OnEnabled()
+     glUniformMatrix4fv(m_hProj, 1, GL_FALSE, m_proj);
+ 
+   glUniform1f(m_hOotfGamma, m_ootfGamma);
++  glUniform1f(m_hHvsCurve, m_hvsCurve);
+ 
+   glActiveTexture(GL_TEXTURE1);
+   glBindTexture(GL_TEXTURE_2D, m_lutDegammaTexId);
+@@ -171,6 +173,8 @@ bool CGuiCompositeShaderGLES::CreateLUTs(int colorTransfer)
+   if (m_lutTFTexId)
+     glDeleteTextures(1, &m_lutTFTexId);
+ 
++  m_hvsCurve = 0.0f;
++
+   m_lutDegammaTexId = CreateLUTTexture(GenerateDegammaLUT());
+   if (!m_lutDegammaTexId)
+   {
+@@ -205,3 +209,29 @@ bool CGuiCompositeShaderGLES::CreateLUTs(int colorTransfer)
+   }
+   return true;
+ }
++
++bool CGuiCompositeShaderGLES::CreateCurveLUT(const std::vector<float>& inverseCurve)
++{
++  if (inverseCurve.empty())
++    return false;
++
++  if (m_lutDegammaTexId)
++    glDeleteTextures(1, &m_lutDegammaTexId);
++  if (m_lutTFTexId)
++    glDeleteTextures(1, &m_lutTFTexId);
++  m_lutDegammaTexId = 0;
++
++  m_lutTFTexId = CreateLUTTexture(inverseCurve);
++  if (!m_lutTFTexId)
++  {
++    CLog::Log(LOGERROR, "CGuiCompositeShaderGLES::CreateCurveLUT - failed to create LUT");
++    return false;
++  }
++
++  m_ootfGamma = 0.0f;
++  m_hvsCurve = 1.0f;
++  CLog::Log(LOGDEBUG, "CGuiCompositeShaderGLES::CreateCurveLUT - created inverse curve LUT ({} "
++                      "entries)",
++            inverseCurve.size());
++  return true;
++}
+diff --git a/xbmc/rendering/gles/GuiCompositeShaderGLES.h b/xbmc/rendering/gles/GuiCompositeShaderGLES.h
+index 9a1f83f..d06631c 100644
+--- a/xbmc/rendering/gles/GuiCompositeShaderGLES.h
++++ b/xbmc/rendering/gles/GuiCompositeShaderGLES.h
+@@ -22,6 +22,11 @@ public:
+   void SetProjection(const GLfloat* proj) { m_proj = proj; }
+ 
+   bool CreateLUTs(int colorTransfer);
++  //! GUI shown through a display hardware curve, inverseCurve undoes it
++  bool CreateCurveLUT(const std::vector<float>& inverseCurve);
++
++  // One entry per RGBA8 input value; increase to match GUI bit depth.
++  static constexpr int LUT_SIZE = 256;
+ 
+   GLint GetPosLoc() { return m_hPos; }
+   GLint GetTexLoc() { return m_hTex; }
+@@ -31,9 +36,6 @@ protected:
+   bool OnEnabled() override;
+ 
+ private:
+-  // One entry per RGBA8 input value; increase to match GUI bit depth.
+-  static constexpr int LUT_SIZE = 256;
+-
+   GLuint CreateLUTTexture(const std::vector<float>& data);
+   static std::vector<float> GenerateDegammaLUT();
+   static std::vector<float> GeneratePQLUT(float sdrPeak);
+@@ -44,6 +46,7 @@ private:
+   GLuint m_lutDegammaTexId{0};
+   GLuint m_lutTFTexId{0};
+   float m_ootfGamma{0.0f};
++  float m_hvsCurve{0.0f};
+ 
+   GLint m_hPos{-1};
+   GLint m_hTex{-1};
+@@ -52,4 +55,5 @@ private:
+   GLint m_hLutTF{-1};
+   GLint m_hProj{-1};
+   GLint m_hOotfGamma{-1};
++  GLint m_hHvsCurve{-1};
+ };
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index 95ad05b..5d36621 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -29,7 +29,11 @@
+ #include "utils/log.h"
+ #include "windowing/GraphicContext.h"
+ 
++#include <algorithm>
++#include <array>
++#include <charconv>
+ #include <cstdio>
++#include <fstream>
+ #include <mutex>
+ #include <string.h>
+ 
+@@ -70,6 +74,8 @@ namespace
+ {
+ constexpr const char* HVS_PQ_TONE_MAPPING = "/sys/module/vc4/parameters/hvs5_pq_gamma";
+ constexpr const char* HVS_PQ_CRTC = "/sys/module/vc4/parameters/hvs5_pq_crtc";
++constexpr const char* HVS_PQ_CURVE = "/sys/module/vc4/parameters/hvs5_pq_pwl";
++constexpr int HVS_PQ_CURVE_POINTS = 16;
+ 
+ //! The kernel reports the CRTC getting the curve, 0 if it was not loaded
+ bool HvsCurveAppliesTo(const CDRMCrtc* crtc)
+@@ -719,3 +725,69 @@ void CWinSystemGbm::SetHwToneMapping(bool enable)
+ 
+   CLog::LogF(LOGINFO, "HVS PQ tone mapping {}", enable ? "on" : "off");
+ }
++
++std::vector<float> CWinSystemGbm::GetHwToneMappingInverse(int size)
++{
++  std::ifstream file(HVS_PQ_CURVE);
++  std::string text;
++  std::getline(file, text);
++
++  // pairs of words: x (31:20) | c (U12.4), gradient (U4.8)
++  const std::vector<std::string> words = StringUtils::Split(text, ',');
++  if (words.size() != HVS_PQ_CURVE_POINTS * 2)
++  {
++    CLog::LogF(LOGERROR, "unexpected curve in {}", HVS_PQ_CURVE);
++    return {};
++  }
++
++  struct Point
++  {
++    float x;
++    float c;
++    float grad;
++  };
++  std::array<Point, HVS_PQ_CURVE_POINTS> points;
++  for (int i = 0; i < HVS_PQ_CURVE_POINTS; i++)
++  {
++    uint32_t word[2];
++    for (int j = 0; j < 2; j++)
++    {
++      const std::string& w = words[i * 2 + j];
++      if (std::from_chars(w.data(), w.data() + w.size(), word[j]).ec != std::errc())
++      {
++        CLog::LogF(LOGERROR, "unexpected curve in {}", HVS_PQ_CURVE);
++        return {};
++      }
++    }
++    points[i] = {static_cast<float>(word[0] >> 20), (word[0] & 0xffff) / 16.0f,
++                 (word[1] & 0xfff) / 256.0f};
++  }
++
++  // as evaluated by the hardware on 12 bit values
++  auto curve = [&points](float x)
++  {
++    int i = HVS_PQ_CURVE_POINTS - 1;
++    while (i > 0 && x < points[i].x)
++      i--;
++    return std::clamp(points[i].c + (x - points[i].x) * points[i].grad, 0.0f, 4095.0f);
++  };
++
++  std::vector<float> inverse(size);
++  for (int i = 0; i < size; i++)
++  {
++    const float target = 4095.0f * i / (size - 1);
++    float low = 0.0f;
++    float high = 4095.0f;
++    for (int n = 0; n < 24; n++)
++    {
++      const float mid = (low + high) / 2;
++      if (curve(mid) < target)
++        low = mid;
++      else
++        high = mid;
++    }
++    inverse[i] = high / 4095.0f;
++  }
++
++  return inverse;
++}
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+index 92ff5aa..60b6752 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -19,6 +19,7 @@
+ #include "platform/linux/input/LibInputHandler.h"
+ 
+ #include <utility>
++#include <vector>
+ 
+ #include <gbm.h>
+ 
+@@ -72,6 +73,11 @@ public:
+   //! Raspberry Pi 4: PQ to SDR curve in the vc4 HVS, applied on the next modeset
+   bool SupportsHwToneMapping() const { return m_hwToneMappingSupported; }
+   void SetHwToneMapping(bool enable);
++
++  //! SetGuiCompositing() transfer for a GUI shown through the HVS curve
++  static constexpr int GUI_COMPOSITE_HVS_CURVE = -1;
++  //! Inverse of the HVS curve sampled at i / (size - 1), empty if not available
++  static std::vector<float> GetHwToneMappingInverse(int size);
+   CHDRCapabilities GetDisplayHDRCapabilities() const override;
+ 
+   // holding the returned reference defers video plane teardown until it is released
+diff --git a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
+index b3eb401..faf6e7f 100644
+--- a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
+@@ -210,7 +210,12 @@ bool CWinSystemGbmGLESContext::SetGuiCompositing(int colorTransfer)
+       }
+     }
+ 
+-    if (!m_compositeShader->CreateLUTs(colorTransfer))
++    const bool lutsCreated =
++        colorTransfer == GUI_COMPOSITE_HVS_CURVE
++            ? m_compositeShader->CreateCurveLUT(
++                  GetHwToneMappingInverse(CGuiCompositeShaderGLES::LUT_SIZE))
++            : m_compositeShader->CreateLUTs(colorTransfer);
++    if (!lutsCreated)
+     {
+       CLog::Log(LOGERROR, "CWinSystemGbmGLESContext: failed to create LUTs");
+       m_compositeShader.reset();
+-- 
+2.53.0
+

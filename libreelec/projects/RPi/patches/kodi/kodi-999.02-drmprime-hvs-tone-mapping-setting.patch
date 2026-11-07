@@ -1,0 +1,269 @@
+From 40f1d9aa4cfca2a2aa4d759e9990733c84ac3002 Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 09:21:52 +0000
+Subject: [PATCH] [DRMPRIME] Add the hardware BT.2390 tone mapping setting
+
+Offer BT.2390 as the tone mapping method when the hardware curve is
+available. It is then the only method besides Off, without the parameter
+slider, and the tone mapping action switches between the two. Shader
+renderers have no BT.2390, so they treat a saved BT.2390 as Hable.
+---
+ .../resources/strings.po                      |  5 ++-
+ xbmc/application/Application.cpp              | 17 ++++++++--
+ xbmc/cores/IPlayer.h                          |  3 +-
+ .../HwDecRender/RendererDRMPRIME.cpp          | 12 ++++++-
+ .../HwDecRender/RendererDRMPRIME.h            |  1 +
+ .../VideoRenderers/LinuxRendererGL.cpp        |  4 +--
+ .../VideoRenderers/LinuxRendererGLES.cpp      |  4 +--
+ .../VideoRenderers/windows/RendererBase.cpp   |  2 +-
+ xbmc/cores/VideoSettings.h                    |  8 +++++
+ xbmc/video/dialogs/GUIDialogVideoSettings.cpp | 32 +++++++++++++------
+ 10 files changed, 68 insertions(+), 20 deletions(-)
+
+diff --git a/addons/resource.language.en_gb/resources/strings.po b/addons/resource.language.en_gb/resources/strings.po
+index 58ddc85..c218a6e 100644
+--- a/addons/resource.language.en_gb/resources/strings.po
++++ b/addons/resource.language.en_gb/resources/strings.po
+@@ -22711,7 +22711,10 @@ msgctxt "#36558"
+ msgid "Hable"
+ msgstr ""
+ 
+-#empty string with id 36559
++#: xbmc/video/dialogs/GUIDialogVideoSettings.cpp
++msgctxt "#36559"
++msgid "BT.2390"
++msgstr ""
+ 
+ #: system/settings/settings.xml
+ msgctxt "#36560"
+diff --git a/xbmc/application/Application.cpp b/xbmc/application/Application.cpp
+index 531130c..5cd3b5e 100644
+--- a/xbmc/application/Application.cpp
++++ b/xbmc/application/Application.cpp
+@@ -1089,10 +1089,18 @@ bool CApplication::OnAction(const CAction &action)
+     if (appPlayer->IsPlayingVideo())
+     {
+       CVideoSettings vs = appPlayer->GetVideoSettings();
+-      vs.m_ToneMapMethod = static_cast<ETONEMAPMETHOD>(static_cast<int>(vs.m_ToneMapMethod) + 1);
+-      if (vs.m_ToneMapMethod >= VS_TONEMAPMETHOD_MAX)
++      if (appPlayer->Supports(RENDERFEATURE_TONEMAP_HW))
++      {
++        vs.m_ToneMapMethod = VS_TONEMAPMETHOD_BT2390;
++      }
++      else
++      {
+         vs.m_ToneMapMethod =
+-            static_cast<ETONEMAPMETHOD>(static_cast<int>(VS_TONEMAPMETHOD_OFF) + 1);
++            static_cast<ETONEMAPMETHOD>(static_cast<int>(vs.m_ToneMapMethod) + 1);
++        if (vs.m_ToneMapMethod >= VS_TONEMAPMETHOD_BT2390)
++          vs.m_ToneMapMethod =
++              static_cast<ETONEMAPMETHOD>(static_cast<int>(VS_TONEMAPMETHOD_OFF) + 1);
++      }
+ 
+       appPlayer->SetVideoSettings(vs);
+ 
+@@ -1108,6 +1116,9 @@ bool CApplication::OnAction(const CAction &action)
+         case VS_TONEMAPMETHOD_HABLE:
+           code = 36558;
+           break;
++        case VS_TONEMAPMETHOD_BT2390:
++          code = 36559;
++          break;
+         default:
+           throw std::logic_error("Tonemapping method not found. Did you forget to add a mapping?");
+       }
+diff --git a/xbmc/cores/IPlayer.h b/xbmc/cores/IPlayer.h
+index 5f96bc3..b99bf60 100644
+--- a/xbmc/cores/IPlayer.h
++++ b/xbmc/cores/IPlayer.h
+@@ -82,7 +82,8 @@ enum ERENDERFEATURE
+   RENDERFEATURE_VERTICAL_SHIFT,
+   RENDERFEATURE_PIXEL_RATIO,
+   RENDERFEATURE_POSTPROCESS,
+-  RENDERFEATURE_TONEMAP
++  RENDERFEATURE_TONEMAP,
++  RENDERFEATURE_TONEMAP_HW // fixed BT.2390 curve in the display hardware
+ };
+ 
+ class IPlayer
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+index ee64ed2..cb124fa 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+@@ -264,6 +264,12 @@ void CRendererDRMPRIME::RenderUpdate(
+     winSystem->RegisterVideoLayerBridge(m_videoLayerBridge);
+   }
+ 
++  if (m_toneMappingAllowed != (m_videoSettings.m_ToneMapMethod != VS_TONEMAPMETHOD_OFF))
++  {
++    m_toneMappingAllowed = !m_toneMappingAllowed;
++    UpdateToneMapping();
++  }
++
+   if (m_iLastRenderBuffer == -1)
+     m_videoLayerBridge->Configure(buffer);
+ 
+@@ -289,6 +295,10 @@ bool CRendererDRMPRIME::Supports(ERENDERFEATURE feature) const
+     case RENDERFEATURE_VERTICAL_SHIFT:
+     case RENDERFEATURE_PIXEL_RATIO:
+       return true;
++    case RENDERFEATURE_TONEMAP:
++    case RENDERFEATURE_TONEMAP_HW:
++      return static_cast<CWinSystemGbm*>(CServiceBroker::GetWinSystem())
++          ->SupportsHwToneMapping();
+     default:
+       return false;
+   }
+@@ -301,7 +311,7 @@ bool CRendererDRMPRIME::Supports(ESCALINGMETHOD method) const
+ 
+ void CRendererDRMPRIME::UpdateToneMapping()
+ {
+-  const bool enable = m_pqWithoutHdr;
++  const bool enable = m_pqWithoutHdr && m_toneMappingAllowed;
+   if (enable == m_hwToneMapping)
+     return;
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+index 5170dfe..291ef6c 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+@@ -54,6 +54,7 @@ private:
+   bool m_bConfigured = false;
+   int m_iLastRenderBuffer = -1;
+   bool m_pqWithoutHdr = false;
++  bool m_toneMappingAllowed = false;
+   bool m_hwToneMapping = false;
+   CRect m_planeDestRect;
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp
+index 3be87a6..229b165 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp
+@@ -997,7 +997,7 @@ void CLinuxRendererGL::LoadShaders(int field)
+     // if single pass, create GLSLOutput helper and pass it to YUV2RGB shader
+     EShaderFormat shaderFormat = GetShaderFormat();
+     std::shared_ptr<GLSLOutput> out;
+-    m_toneMapMethod = m_videoSettings.m_ToneMapMethod;
++    m_toneMapMethod = ShaderToneMapMethod(m_videoSettings.m_ToneMapMethod);
+     if (m_renderQuality == RQ_SINGLEPASS)
+     {
+       out = std::make_shared<GLSLOutput>(GLSLOutput(4, m_useDithering, m_ditherDepth,
+@@ -2775,7 +2775,7 @@ void CLinuxRendererGL::DeleteCLUT()
+ void CLinuxRendererGL::CheckVideoParameters(int index)
+ {
+   const CPictureBuffer& buf = m_buffers[index];
+-  const ETONEMAPMETHOD& toneMapMethod = m_videoSettings.m_ToneMapMethod;
++  const ETONEMAPMETHOD toneMapMethod = ShaderToneMapMethod(m_videoSettings.m_ToneMapMethod);
+ 
+   if (buf.m_srcPrimaries != m_srcPrimaries)
+   {
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp
+index 2762bc3..c8b6232 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp
+@@ -964,7 +964,7 @@ void CLinuxRendererGLES::LoadShaders(int field)
+           }
+ 
+           EShaderFormat shaderFormat = GetShaderFormat();
+-          m_toneMapMethod = m_videoSettings.m_ToneMapMethod;
++          m_toneMapMethod = ShaderToneMapMethod(m_videoSettings.m_ToneMapMethod);
+ 
+           // Try single-pass filter shader for FAST scalers on GLES 3.1+
+           if (m_renderQuality == RQ_SINGLEPASS &&
+@@ -2221,7 +2221,7 @@ bool CLinuxRendererGLES::IsGuiLayer()
+ void CLinuxRendererGLES::CheckVideoParameters(int index)
+ {
+   const CPictureBuffer& buf = m_buffers[index];
+-  const ETONEMAPMETHOD& toneMapMethod = m_videoSettings.m_ToneMapMethod;
++  const ETONEMAPMETHOD toneMapMethod = ShaderToneMapMethod(m_videoSettings.m_ToneMapMethod);
+ 
+   if (buf.m_srcPrimaries != m_srcPrimaries)
+   {
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp
+index bc5d23f..d893932 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp
+@@ -496,7 +496,7 @@ void CRendererBase::UpdateVideoFilters()
+ void CRendererBase::CheckVideoParameters()
+ {
+   CRenderBuffer* buf = m_renderBuffers[m_iBufferIndex];
+-  ETONEMAPMETHOD method = m_videoSettings.m_ToneMapMethod;
++  ETONEMAPMETHOD method = ShaderToneMapMethod(m_videoSettings.m_ToneMapMethod);
+ 
+   bool isHDRPQ = (buf->color_transfer == AVCOL_TRC_SMPTE2084 && buf->primaries == AVCOL_PRI_BT2020);
+ 
+diff --git a/xbmc/cores/VideoSettings.h b/xbmc/cores/VideoSettings.h
+index 82779fb..c0c11bb 100644
+--- a/xbmc/cores/VideoSettings.h
++++ b/xbmc/cores/VideoSettings.h
+@@ -160,9 +160,16 @@ enum ETONEMAPMETHOD
+   VS_TONEMAPMETHOD_REINHARD = 1,
+   VS_TONEMAPMETHOD_ACES = 2,
+   VS_TONEMAPMETHOD_HABLE = 3,
++  VS_TONEMAPMETHOD_BT2390 = 4,
+   VS_TONEMAPMETHOD_MAX
+ };
+ 
++//! BT.2390 is only done in hardware (DRM PRIME), shaders use Hable for it
++constexpr ETONEMAPMETHOD ShaderToneMapMethod(ETONEMAPMETHOD method)
++{
++  return method == VS_TONEMAPMETHOD_BT2390 ? VS_TONEMAPMETHOD_HABLE : method;
++}
++
+ template<>
+ struct fmt::formatter<ETONEMAPMETHOD> : fmt::formatter<std::string_view>
+ {
+@@ -189,6 +196,7 @@ private:
+       {VS_TONEMAPMETHOD_REINHARD, "reinhard"},
+       {VS_TONEMAPMETHOD_ACES, "aces"},
+       {VS_TONEMAPMETHOD_HABLE, "hable"},
++      {VS_TONEMAPMETHOD_BT2390, "bt2390"},
+   });
+ 
+   static_assert(VS_TONEMAPMETHOD_MAX == tonemapMethodMap.size(),
+diff --git a/xbmc/video/dialogs/GUIDialogVideoSettings.cpp b/xbmc/video/dialogs/GUIDialogVideoSettings.cpp
+index 4f42759..8f31ca6 100644
+--- a/xbmc/video/dialogs/GUIDialogVideoSettings.cpp
++++ b/xbmc/video/dialogs/GUIDialogVideoSettings.cpp
+@@ -444,15 +444,29 @@ void CGUIDialogVideoSettings::InitializeSettings()
+     const bool visible = !CServiceBroker::GetWinSystem()->IsHDRDisplaySettingEnabled();
+     entries.clear();
+     entries.emplace_back(36554, VS_TONEMAPMETHOD_OFF);
+-    entries.emplace_back(36555, VS_TONEMAPMETHOD_REINHARD);
+-    entries.emplace_back(36557, VS_TONEMAPMETHOD_ACES);
+-    entries.emplace_back(36558, VS_TONEMAPMETHOD_HABLE);
+-
+-    AddSpinner(groupVideo, SETTING_VIDEO_TONEMAP_METHOD, 36553, SettingLevel::Basic,
+-               videoSettings.m_ToneMapMethod, entries, false, visible);
+-    AddSlider(groupVideo, SETTING_VIDEO_TONEMAP_PARAM, 36556, SettingLevel::Basic,
+-              videoSettings.m_ToneMapParam, "{:2.2f}", 0.1f, 0.1f, 5.0f, 36556, usePopup, false,
+-              visible);
++
++    if (appPlayer->Supports(RENDERFEATURE_TONEMAP_HW))
++    {
++      // any method other than off selects the hardware curve
++      entries.emplace_back(36559, VS_TONEMAPMETHOD_BT2390);
++      const int method = videoSettings.m_ToneMapMethod == VS_TONEMAPMETHOD_OFF
++                             ? VS_TONEMAPMETHOD_OFF
++                             : VS_TONEMAPMETHOD_BT2390;
++      AddSpinner(groupVideo, SETTING_VIDEO_TONEMAP_METHOD, 36553, SettingLevel::Basic, method,
++                 entries, false, visible);
++    }
++    else
++    {
++      entries.emplace_back(36555, VS_TONEMAPMETHOD_REINHARD);
++      entries.emplace_back(36557, VS_TONEMAPMETHOD_ACES);
++      entries.emplace_back(36558, VS_TONEMAPMETHOD_HABLE);
++
++      AddSpinner(groupVideo, SETTING_VIDEO_TONEMAP_METHOD, 36553, SettingLevel::Basic,
++                 videoSettings.m_ToneMapMethod, entries, false, visible);
++      AddSlider(groupVideo, SETTING_VIDEO_TONEMAP_PARAM, 36556, SettingLevel::Basic,
++                videoSettings.m_ToneMapParam, "{:2.2f}", 0.1f, 0.1f, 5.0f, 36556, usePopup, false,
++                visible);
++    }
+   }
+ 
+   // stereoscopic settings
+-- 
+2.53.0
+

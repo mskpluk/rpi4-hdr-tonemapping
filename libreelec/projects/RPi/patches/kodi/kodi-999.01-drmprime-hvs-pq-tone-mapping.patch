@@ -1,0 +1,195 @@
+From 51b1c4b914d24a81b763e8ce227b4b63131f1f59 Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 09:19:45 +0000
+Subject: [PATCH] [DRMPRIME] Map PQ to SDR with the Raspberry Pi 4 HVS curve
+
+The Raspberry Pi 4 shows HEVC frames on a DRM plane, a path without tone
+mapping, and its GPU cannot draw 4K through the shader renderer fast
+enough. With vc4.hvs5_pq=1, the kernel loads a PQ to SDR curve into the
+gamma block of the display controller and reports the CRTC it applies to
+in hvs5_pq_crtc.
+
+When that is the CRTC Kodi drives, turn the curve on through
+hvs5_pq_gamma for PQ video that is not passed through as HDR, and mark
+the CRTC active so the next commit allows the modeset the kernel needs to
+switch it. Reset it at startup, as a previous instance may have left it
+on.
+---
+ .../HwDecRender/RendererDRMPRIME.cpp          | 14 +++++
+ .../HwDecRender/RendererDRMPRIME.h            |  4 ++
+ xbmc/windowing/gbm/WinSystemGbm.cpp           | 60 +++++++++++++++++++
+ xbmc/windowing/gbm/WinSystemGbm.h             |  6 ++
+ 4 files changed, 84 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+index 40556ef..ee64ed2 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+@@ -35,6 +35,7 @@ CRendererDRMPRIME::~CRendererDRMPRIME()
+   // Clear the scanout colorspace and HDR metadata set during Configure so
+   // the GUI after playback falls back to Default / SDR.
+   winSystem->SetGuiCompositing(false);
++  winSystem->SetHwToneMapping(false);
+   winSystem->SetHDR(nullptr);
+   winSystem->SetColorimetry(nullptr);
+ }
+@@ -132,6 +133,9 @@ bool CRendererDRMPRIME::Configure(const VideoPicture& picture, float fps, unsign
+     if (passthroughHDR && !hdrFboActive)
+       CLog::Log(LOGWARNING, "CRendererDRMPRIME::Configure: HDR passthrough active but "
+                             "GUI compositing not supported by windowing system");
++
++    m_pqWithoutHdr = !passthroughHDR && picture.color_transfer == AVCOL_TRC_SMPTE2084;
++    UpdateToneMapping();
+   }
+ 
+   // Calculate the input frame aspect ratio.
+@@ -294,3 +298,13 @@ bool CRendererDRMPRIME::Supports(ESCALINGMETHOD method) const
+ {
+   return false;
+ }
++
++void CRendererDRMPRIME::UpdateToneMapping()
++{
++  const bool enable = m_pqWithoutHdr;
++  if (enable == m_hwToneMapping)
++    return;
++
++  m_hwToneMapping = enable;
++  static_cast<CWinSystemGbm*>(CServiceBroker::GetWinSystem())->SetHwToneMapping(enable);
++}
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+index 11cb03d..5170dfe 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+@@ -49,8 +49,12 @@ protected:
+   void ManageRenderArea() override;
+ 
+ private:
++  void UpdateToneMapping();
++
+   bool m_bConfigured = false;
+   int m_iLastRenderBuffer = -1;
++  bool m_pqWithoutHdr = false;
++  bool m_hwToneMapping = false;
+   CRect m_planeDestRect;
+ 
+   std::shared_ptr<CVideoLayerBridgeDRMPRIME> m_videoLayerBridge;
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index 644fd4b..6c2e92c 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -29,9 +29,12 @@
+ #include "utils/log.h"
+ #include "windowing/GraphicContext.h"
+ 
++#include <cstdio>
+ #include <mutex>
+ #include <string.h>
+ 
++#include <unistd.h>
++
+ #ifndef HAVE_HDR_OUTPUT_METADATA
+ // HDR structs is copied from linux include/linux/hdmi.h
+ struct hdr_metadata_infoframe
+@@ -63,6 +66,39 @@ struct hdr_output_metadata
+ 
+ using namespace KODI::WINDOWING::GBM;
+ 
++namespace
++{
++constexpr const char* HVS_PQ_TONE_MAPPING = "/sys/module/vc4/parameters/hvs5_pq_gamma";
++constexpr const char* HVS_PQ_CRTC = "/sys/module/vc4/parameters/hvs5_pq_crtc";
++
++//! The kernel reports the CRTC getting the curve, 0 if it was not loaded
++bool HvsCurveAppliesTo(const CDRMCrtc* crtc)
++{
++  if (!crtc || access(HVS_PQ_TONE_MAPPING, W_OK) != 0)
++    return false;
++
++  FILE* file = std::fopen(HVS_PQ_CRTC, "r");
++  if (!file)
++    return false;
++
++  unsigned int id = 0;
++  const bool read = std::fscanf(file, "%u", &id) == 1;
++  std::fclose(file);
++
++  return read && id == crtc->GetId();
++}
++
++bool WriteHvsToneMapping(bool enable)
++{
++  FILE* file = std::fopen(HVS_PQ_TONE_MAPPING, "w");
++  if (!file)
++    return false;
++
++  const bool written = std::fputs(enable ? "1" : "0", file) >= 0;
++  return std::fclose(file) == 0 && written;
++}
++} // namespace
++
+ using namespace std::chrono_literals;
+ 
+ namespace
+@@ -184,6 +220,10 @@ bool CWinSystemGbm::InitWindowSystem()
+   SetColorimetry(nullptr);
+   SetHDR(nullptr);
+ 
++  // a previous instance may have left the curve on
++  WriteHvsToneMapping(false);
++  m_hwToneMappingSupported = HvsCurveAppliesTo(m_DRM->GetCrtc());
++
+   auto settingsComponent = CServiceBroker::GetSettingsComponent();
+   if (!settingsComponent)
+     return false;
+@@ -654,3 +694,23 @@ CHDRCapabilities CWinSystemGbm::GetDisplayHDRCapabilities() const
+ 
+   return caps;
+ }
++
++void CWinSystemGbm::SetHwToneMapping(bool enable)
++{
++  if (enable == m_hwToneMapping)
++    return;
++
++  if (!WriteHvsToneMapping(enable))
++  {
++    CLog::LogF(LOGERROR, "failed to write {}", HVS_PQ_TONE_MAPPING);
++    return;
++  }
++
++  m_hwToneMapping = enable;
++
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (drm)
++    drm->SetActive(true);
++
++  CLog::LogF(LOGINFO, "HVS PQ tone mapping {}", enable ? "on" : "off");
++}
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+index 2105a76..92ff5aa 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -68,6 +68,10 @@ public:
+   KODI::UTILS::Eotf GetEotf() const override { return m_eotf; }
+   bool SetHDR(const VideoPicture* videoPicture) override;
+   bool IsHDRDisplay() override;
++
++  //! Raspberry Pi 4: PQ to SDR curve in the vc4 HVS, applied on the next modeset
++  bool SupportsHwToneMapping() const { return m_hwToneMappingSupported; }
++  void SetHwToneMapping(bool enable);
+   CHDRCapabilities GetDisplayHDRCapabilities() const override;
+ 
+   // holding the returned reference defers video plane teardown until it is released
+@@ -101,6 +105,8 @@ protected:
+ 
+ private:
+   CDRMPropertyBlob m_hdrBlob;
++  bool m_hwToneMapping{false};
++  bool m_hwToneMappingSupported{false};
+   KODI::UTILS::Eotf m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
+   KODI::UTILS::Colorimetry m_colorimetry = KODI::UTILS::Colorimetry::DEFAULT;
+ 
+-- 
+2.53.0
+

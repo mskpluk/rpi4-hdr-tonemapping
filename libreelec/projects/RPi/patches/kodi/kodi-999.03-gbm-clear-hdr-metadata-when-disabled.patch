@@ -1,0 +1,186 @@
+From c50f68638a6b5652c85163e0f4f2b3d7d9b3d84c Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 09:23:47 +0000
+Subject: [PATCH] [GBM] Clear HDR metadata when HDR display mode is turned off
+ during playback
+
+SetHDR() returned early when "Adjust display HDR mode" was off, so turning
+it off during playback left HDR_OUTPUT_METADATA set and the TV in HDR
+mode. With the hardware curve on, the picture was then tone mapped twice.
+
+Clear the metadata when the setting is off, and let the renderer notice
+both this setting and the tone mapping method changing during playback.
+While the curve is on, the connector colorimetry is left at default,
+because the curve outputs BT.709.
+---
+ .../HwDecRender/RendererDRMPRIME.cpp          | 82 ++++++++++++-------
+ .../HwDecRender/RendererDRMPRIME.h            |  5 ++
+ xbmc/windowing/gbm/WinSystemGbm.cpp           |  7 +-
+ 3 files changed, 64 insertions(+), 30 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+index cb124fa..792c1b5 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+@@ -117,26 +117,10 @@ bool CRendererDRMPRIME::Configure(const VideoPicture& picture, float fps, unsign
+              GetFlagsColorPrimaries(picture.color_primaries) |
+              GetFlagsStereoMode(picture.stereoMode);
+ 
+-  // Signal source colorimetry and HDR metadata on the scanout via the DRM
+-  // Colorspace and HDR_OUTPUT_METADATA connector properties. The direct-to-
+-  // plane scanout path bypasses GL video rendering entirely.
+-  if (auto* winSystem = CServiceBroker::GetWinSystem())
+-  {
+-    winSystem->SetColorimetry(&picture);
+-
+-    const bool passthroughHDR = winSystem->SetHDR(&picture);
+-    CLog::Log(LOGDEBUG, "CRendererDRMPRIME::Configure: HDR passthrough: {}",
+-              passthroughHDR ? "on" : "off");
+-
+-    const bool hdrFboActive =
+-        passthroughHDR && winSystem->SetGuiCompositing(picture.color_transfer);
+-    if (passthroughHDR && !hdrFboActive)
+-      CLog::Log(LOGWARNING, "CRendererDRMPRIME::Configure: HDR passthrough active but "
+-                            "GUI compositing not supported by windowing system");
+-
+-    m_pqWithoutHdr = !passthroughHDR && picture.color_transfer == AVCOL_TRC_SMPTE2084;
+-    UpdateToneMapping();
+-  }
++  m_picture.SetParams(picture);
++  m_hdrDisplay = CServiceBroker::GetWinSystem()->IsHDRDisplaySettingEnabled();
++  m_toneMappingAllowed = m_videoSettings.m_ToneMapMethod != VS_TONEMAPMETHOD_OFF;
++  ConfigureHDR();
+ 
+   // Calculate the input frame aspect ratio.
+   CalculateFrameAspectRatio(picture.iDisplayWidth, picture.iDisplayHeight);
+@@ -243,6 +227,20 @@ void CRendererDRMPRIME::Update()
+ void CRendererDRMPRIME::RenderUpdate(
+     int index, int index2, bool clear, unsigned int flags, unsigned int alpha)
+ {
++  // both settings can be changed during playback
++  const bool hdrDisplay = CServiceBroker::GetWinSystem()->IsHDRDisplaySettingEnabled();
++  if (hdrDisplay != m_hdrDisplay)
++  {
++    m_hdrDisplay = hdrDisplay;
++    ConfigureHDR();
++  }
++
++  if (m_toneMappingAllowed != (m_videoSettings.m_ToneMapMethod != VS_TONEMAPMETHOD_OFF))
++  {
++    m_toneMappingAllowed = !m_toneMappingAllowed;
++    UpdateToneMapping();
++  }
++
+   if (m_iLastRenderBuffer == index && m_videoLayerBridge)
+   {
+     m_videoLayerBridge->UpdateVideoPlane();
+@@ -264,12 +262,6 @@ void CRendererDRMPRIME::RenderUpdate(
+     winSystem->RegisterVideoLayerBridge(m_videoLayerBridge);
+   }
+ 
+-  if (m_toneMappingAllowed != (m_videoSettings.m_ToneMapMethod != VS_TONEMAPMETHOD_OFF))
+-  {
+-    m_toneMappingAllowed = !m_toneMappingAllowed;
+-    UpdateToneMapping();
+-  }
+-
+   if (m_iLastRenderBuffer == -1)
+     m_videoLayerBridge->Configure(buffer);
+ 
+@@ -309,12 +301,44 @@ bool CRendererDRMPRIME::Supports(ESCALINGMETHOD method) const
+   return false;
+ }
+ 
++void CRendererDRMPRIME::ConfigureHDR()
++{
++  // Signal source colorimetry and HDR metadata on the scanout via the DRM
++  // Colorspace and HDR_OUTPUT_METADATA connector properties. The direct-to-
++  // plane scanout path bypasses GL video rendering entirely.
++  auto* winSystem = CServiceBroker::GetWinSystem();
++  if (!winSystem)
++    return;
++
++  const bool passthroughHDR = winSystem->SetHDR(&m_picture);
++  CLog::Log(LOGDEBUG, "CRendererDRMPRIME::Configure: HDR passthrough: {}",
++            passthroughHDR ? "on" : "off");
++
++  const bool hdrFboActive = passthroughHDR && winSystem->SetGuiCompositing(m_picture.color_transfer);
++  if (passthroughHDR && !hdrFboActive)
++    CLog::Log(LOGWARNING, "CRendererDRMPRIME::Configure: HDR passthrough active but "
++                          "GUI compositing not supported by windowing system");
++  else if (!passthroughHDR && winSystem->IsHdrComposite())
++    winSystem->SetGuiCompositing(false);
++
++  m_pqWithoutHdr = !passthroughHDR && m_picture.color_transfer == AVCOL_TRC_SMPTE2084;
++  m_colorimetrySet = false;
++  UpdateToneMapping();
++}
++
+ void CRendererDRMPRIME::UpdateToneMapping()
+ {
+-  const bool enable = m_pqWithoutHdr && m_toneMappingAllowed;
+-  if (enable == m_hwToneMapping)
++  auto* winSystem = static_cast<CWinSystemGbm*>(CServiceBroker::GetWinSystem());
++
++  const bool enable =
++      m_pqWithoutHdr && m_toneMappingAllowed && winSystem->SupportsHwToneMapping();
++  if (enable == m_hwToneMapping && m_colorimetrySet)
+     return;
+ 
++  // the curve outputs BT.709
++  winSystem->SetColorimetry(enable ? nullptr : &m_picture);
++  m_colorimetrySet = true;
++
+   m_hwToneMapping = enable;
+-  static_cast<CWinSystemGbm*>(CServiceBroker::GetWinSystem())->SetHwToneMapping(enable);
++  winSystem->SetHwToneMapping(enable);
+ }
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+index 291ef6c..30e3de2 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
+@@ -8,6 +8,7 @@
+ 
+ #pragma once
+ 
++#include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
+ #include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
+ 
+ class CVideoBuffer;
+@@ -49,10 +50,14 @@ protected:
+   void ManageRenderArea() override;
+ 
+ private:
++  void ConfigureHDR();
+   void UpdateToneMapping();
+ 
+   bool m_bConfigured = false;
+   int m_iLastRenderBuffer = -1;
++  VideoPicture m_picture;
++  bool m_hdrDisplay = false;
++  bool m_colorimetrySet = false;
+   bool m_pqWithoutHdr = false;
+   bool m_toneMappingAllowed = false;
+   bool m_hwToneMapping = false;
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index 6c2e92c..95ad05b 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -547,8 +547,13 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+   if (!settings)
+     return false;
+ 
++  // the setting may be turned off while HDR metadata is still set
+   if (!settings->GetBool(SETTING_WINSYSTEM_IS_HDR_DISPLAY))
+-    return false;
++  {
++    if (!m_hdrBlob.IsValid())
++      return false;
++    videoPicture = nullptr;
++  }
+ 
+   auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
+   if (!drm)
+-- 
+2.53.0
+

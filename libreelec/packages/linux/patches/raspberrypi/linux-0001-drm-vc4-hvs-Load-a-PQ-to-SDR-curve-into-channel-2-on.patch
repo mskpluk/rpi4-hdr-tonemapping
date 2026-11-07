@@ -1,0 +1,223 @@
+From 21ba3ddca0974d50903a210742e7815efa36b2dd Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 19:03:31 +0000
+Subject: [PATCH 1/3] drm/vc4: hvs: Load a PQ to SDR curve into channel 2 on
+ BCM2711
+
+Every BCM2711 HVS channel ends in a gamma block, a 16-point piecewise
+linear curve per component. The PWL SRAM of a channel ignores writes once
+that channel has run, and the firmware uses channel 1 at boot, so only a
+channel that has never run can take a new curve.
+
+With vc4.hvs5_pq=1, load a PQ to SDR curve into channel 2 at bind time,
+read it back, and let HDMI0 take channel 2. The default curve is the
+BT.2390 EETF from 4000 to 203 cd/m2 with a BT.1886 encoding. Another one
+can be given through hvs5_pq_pwl on the kernel command line.
+
+hvs5_pq_crtc reports the DRM object ID of the CRTC the curve applies to,
+or 0, so userspace can tell whether its output has the curve.
+
+This is opt-in because channel 2 is the only channel TXP writeback can
+use.
+---
+ drivers/gpu/drm/vc4/vc4_drv.h  |   4 ++
+ drivers/gpu/drm/vc4/vc4_hvs.c  | 105 +++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/vc4/vc4_kms.c  |   8 +++
+ drivers/gpu/drm/vc4/vc4_regs.h |   4 ++
+ 4 files changed, 121 insertions(+)
+
+diff --git a/drivers/gpu/drm/vc4/vc4_drv.h b/drivers/gpu/drm/vc4/vc4_drv.h
+index 2ed82b3..d6e7ea1 100644
+--- a/drivers/gpu/drm/vc4/vc4_drv.h
++++ b/drivers/gpu/drm/vc4/vc4_drv.h
+@@ -392,6 +392,9 @@ struct vc4_hvs {
+ 	 * whether that is sufficient.
+ 	 */
+ 	bool vc5_hdmi_enable_4096by2160;
++
++	/* BCM2711: PQ to SDR curve loaded into the HVS channel 2 PWL. */
++	bool vc5_gamma_loaded;
+ };
+ 
+ #define HVS_UBM_WORD_SIZE 256
+@@ -1086,6 +1089,7 @@ struct vc4_hvs *__vc4_hvs_alloc(struct vc4_dev *vc4,
+ 				void __iomem *regs,
+ 				struct platform_device *pdev);
+ void vc4_hvs_stop_channel(struct vc4_hvs *hvs, unsigned int output);
++void vc5_hvs_pq_gamma_find_crtc(struct drm_device *dev);
+ int vc4_hvs_get_fifo_from_output(struct vc4_hvs *hvs, unsigned int output);
+ u8 vc4_hvs_get_fifo_frame_count(struct vc4_hvs *hvs, unsigned int fifo);
+ void vc4_hvs_mark_dlist_entry_stale(struct vc4_hvs *hvs,
+diff --git a/drivers/gpu/drm/vc4/vc4_hvs.c b/drivers/gpu/drm/vc4/vc4_hvs.c
+index 97e22d6..386502e 100644
+--- a/drivers/gpu/drm/vc4/vc4_hvs.c
++++ b/drivers/gpu/drm/vc4/vc4_hvs.c
+@@ -22,6 +22,7 @@
+ #include <linux/bitfield.h>
+ #include <linux/clk.h>
+ #include <linux/component.h>
++#include <linux/moduleparam.h>
+ #include <linux/platform_device.h>
+ 
+ #include <drm/drm_atomic_helper.h>
+@@ -953,6 +954,107 @@ int vc4_hvs_get_fifo_from_output(struct vc4_hvs *hvs, unsigned int output)
+ 	}
+ }
+ 
++/*
++ * BCM2711 only: a PQ to SDR tone curve in the HVS5 gamma block.
++ *
++ * Off unless hvs5_pq is set on the kernel command line, because HDMI0
++ * then keeps HVS channel 2, the only channel TXP writeback can use.
++ *
++ * The PWL SRAM of a channel ignores writes once that channel has run,
++ * so the curve is loaded at bind time into channel 2, which neither
++ * the firmware nor the kernel has used yet, and HDMI0 prefers that
++ * channel. The gamma enable bit must only change while the channel
++ * is being (re)initialised: clearing it on a running channel stalls
++ * the channel.
++ */
++static bool hvs5_pq;
++module_param(hvs5_pq, bool, 0444);
++MODULE_PARM_DESC(hvs5_pq,
++		 "BCM2711: load the PQ to SDR curve at boot, HDMI0 then takes HVS channel 2");
++
++#define VC5_GAMMA_CHAN		2
++
++/*
++ * PQ to SDR: BT.2390 EETF 4000 -> 203 nits, BT.1886 2.4 encoding.
++ * Pairs of PWL words per point: X (31:20) | C (U12.4), gradient (U4.8).
++ * Read-only at runtime; another curve can be given on the kernel command
++ * line, it is loaded at bind time.
++ */
++static uint hvs5_pq_pwl[SCALER5_DSPGAMMA_NUM_POINTS * 2] = {
++	0x00000000, 0x000000b4, /* x    0 c     0.0 grad  0.703 */
++	0x083005c5, 0x000000b0, /* x  131 c    92.3 grad  0.688 */
++	0x1cc013eb, 0x000000e2, /* x  460 c   318.7 grad  0.883 */
++	0x2dc022e7, 0x0000011a, /* x  732 c   558.4 grad  1.102 */
++	0x3d0033ad, 0x00000157, /* x  976 c   826.8 grad  1.340 */
++	0x4ae04648, 0x0000019b, /* x 1198 c  1124.5 grad  1.605 */
++	0x57a05abd, 0x000001e4, /* x 1402 c  1451.8 grad  1.891 */
++	0x636070f5, 0x0000022d, /* x 1590 c  1807.3 grad  2.176 */
++	0x7d20a900, 0x000001ec, /* x 2002 c  2704.0 grad  1.922 */
++	0x89d0c168, 0x000001a2, /* x 2205 c  3094.5 grad  1.633 */
++	0x9560d446, 0x00000153, /* x 2390 c  3396.4 grad  1.324 */
++	0xa090e311, 0x00000103, /* x 2569 c  3633.1 grad  1.012 */
++	0xabe0ee7f, 0x000000b5, /* x 2750 c  3815.9 grad  0.707 */
++	0xb7d0f6f0, 0x0000006d, /* x 2941 c  3951.0 grad  0.426 */
++	0xc500fc89, 0x0000002e, /* x 3152 c  4040.6 grad  0.180 */
++	0xd530ff72, 0x00000003, /* x 3411 c  4087.1 grad  0.012 */
++};
++module_param_array(hvs5_pq_pwl, uint, NULL, 0444);
++MODULE_PARM_DESC(hvs5_pq_pwl, "BCM2711: PQ to SDR curve for HDMI0, 16 PWL points");
++
++/*
++ * Lets userspace check that the curve applies to its CRTC: not on other
++ * SoCs or outputs, nor when the curve could not be loaded.
++ */
++static uint hvs5_pq_crtc;
++module_param(hvs5_pq_crtc, uint, 0444);
++MODULE_PARM_DESC(hvs5_pq_crtc,
++		 "BCM2711: DRM object ID of the CRTC (HDMI0) the PQ to SDR curve applies to, 0 if none");
++
++void vc5_hvs_pq_gamma_find_crtc(struct drm_device *dev)
++{
++	struct vc4_dev *vc4 = to_vc4_dev(dev);
++	struct drm_crtc *crtc;
++
++	hvs5_pq_crtc = 0;
++	if (vc4->gen != VC4_GEN_5 || !vc4->hvs || !vc4->hvs->vc5_gamma_loaded)
++		return;
++
++	drm_for_each_crtc(crtc, dev) {
++		if (to_vc4_crtc(crtc)->data == &bcm2711_pv2_data.base)
++			hvs5_pq_crtc = crtc->base.id;
++	}
++}
++
++static void vc5_hvs_gamma_load(struct vc4_hvs *hvs)
++{
++	struct drm_device *drm = &hvs->vc4->base;
++	u32 offset = SCALER5_DSPGAMMA_START +
++		     VC5_GAMMA_CHAN * SCALER5_DSPGAMMA_CHAN_OFFSET;
++	unsigned int comp, i;
++
++	/* R, G and B get the curve, alpha (channel 2 only) stays linear. */
++	for (comp = 0; comp < 4; comp++) {
++		for (i = 0; i < SCALER5_DSPGAMMA_NUM_POINTS; i++, offset += 8) {
++			u32 x_c = comp < 3 ? hvs5_pq_pwl[i * 2] :
++				  (i * 256) << 20 | (i * 256) << 4;
++			u32 grad = comp < 3 ? hvs5_pq_pwl[i * 2 + 1] : 256;
++
++			HVS_WRITE(offset, x_c);
++			HVS_WRITE(offset + 4, grad);
++			if (HVS_READ(offset) != x_c ||
++			    HVS_READ(offset + 4) != grad) {
++				drm_warn(drm, "HVS5 gamma: channel %u PWL write not accepted\n",
++					 VC5_GAMMA_CHAN);
++				return;
++			}
++		}
++	}
++
++	hvs->vc5_gamma_loaded = true;
++	drm_info(drm, "HVS5 gamma: PQ to SDR curve loaded on channel %u\n",
++		 VC5_GAMMA_CHAN);
++}
++
+ static int vc4_hvs_init_channel(struct vc4_hvs *hvs, struct drm_crtc *crtc,
+ 				struct drm_display_mode *mode, bool oneshot)
+ {
+@@ -2215,6 +2317,9 @@ static int vc4_hvs_bind(struct device *dev, struct device *master, void *data)
+ 	if (ret)
+ 		return ret;
+ 
++	if (vc4->gen == VC4_GEN_5 && hvs5_pq)
++		vc5_hvs_gamma_load(hvs);
++
+ 	/* Upload filter kernels.  We only have the two for now, so we
+ 	 * keep them around for the lifetime of the driver.
+ 	 */
+diff --git a/drivers/gpu/drm/vc4/vc4_kms.c b/drivers/gpu/drm/vc4/vc4_kms.c
+index 6e33932..f6796cc 100644
+--- a/drivers/gpu/drm/vc4/vc4_kms.c
++++ b/drivers/gpu/drm/vc4/vc4_kms.c
+@@ -1045,6 +1045,12 @@ static int vc4_pv_muxing_atomic_check(struct drm_device *dev,
+ 
+ 		channel = ffs(matching_channels) - 1;
+ 
++		/* HDMI0 takes the channel holding the PQ to SDR curve. */
++		if (vc4->gen == VC4_GEN_5 && vc4->hvs->vc5_gamma_loaded &&
++		    vc4_crtc->data == &bcm2711_pv2_data.base &&
++		    (matching_channels & BIT(2)))
++			channel = 2;
++
+ 		drm_dbg(dev, "Assigned HVS channel %d to CRTC %s\n", channel, crtc->name);
+ 		new_vc4_crtc_state->assigned_channel = channel;
+ 		unassigned_channels &= ~BIT(channel);
+@@ -1231,5 +1237,7 @@ int vc4_kms_load(struct drm_device *dev)
+ 
+ 	drmm_kms_helper_poll_init(dev);
+ 
++	vc5_hvs_pq_gamma_find_crtc(dev);
++
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/vc4/vc4_regs.h b/drivers/gpu/drm/vc4/vc4_regs.h
+index f79d4b2..0582f8a 100644
+--- a/drivers/gpu/drm/vc4/vc4_regs.h
++++ b/drivers/gpu/drm/vc4/vc4_regs.h
+@@ -549,6 +549,10 @@
+ 
+ #define SCALER5_DLIST_START			0x00004000
+ 
++#define SCALER5_DSPGAMMA_START			0x00002000
++#define SCALER5_DSPGAMMA_CHAN_OFFSET		0x00000400
++#define SCALER5_DSPGAMMA_NUM_POINTS		16
++
+ #define SCALER6_VERSION				0x00000000
+ # define SCALER6_VERSION_MASK			VC4_MASK(7, 0)
+ # define SCALER6_VERSION_C0			0x00000053
+-- 
+2.53.0
+

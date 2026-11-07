@@ -1,0 +1,35 @@
+From af0a351b1eaabd254ca345a7ee99c2a81138fc1f Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 22:34:39 +0000
+Subject: [PATCH] Fix serving files after the path traversal fix
+
+Platinum now keeps the "/" file root when joining it to the requested
+path, so ServeFile gets "/<md5>/<name>" and every file request fails
+with 404. Drop the leading slash before looking up the hash.
+
+(cherry picked from commit 0d8b2f91b9939d1e31a838d9f46ca03394a57ce9)
+---
+ xbmc/network/upnp/UPnPServer.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/network/upnp/UPnPServer.cpp b/xbmc/network/upnp/UPnPServer.cpp
+index d3e3ec0..47b6e23 100644
+--- a/xbmc/network/upnp/UPnPServer.cpp
++++ b/xbmc/network/upnp/UPnPServer.cpp
+@@ -1459,8 +1459,12 @@ failure:
+ NPT_Result CUPnPServer::ServeFile(const NPT_HttpRequest& request,
+                                   const NPT_HttpRequestContext& context,
+                                   NPT_HttpResponse& response,
+-                                  const NPT_String& md5)
++                                  const NPT_String& requested_path)
+ {
++  // Platinum joins the requested hash to the "/" file root
++  const NPT_String md5(requested_path.StartsWith("/") ? requested_path.SubString(1)
++                                                      : requested_path);
++
+   // Translate hash to filename
+   NPT_String file_path(md5), *file_path2;
+   {
+-- 
+2.53.0
+

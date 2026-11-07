@@ -1,0 +1,168 @@
+From aa8610b12efa8418b9d21a629f4b1aa0ac95cc56 Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 19:03:31 +0000
+Subject: [PATCH 2/3] drm/vc4: hvs: Apply the PQ to SDR curve on HDMI0
+
+Clearing SCALER_DISPBKGND_GAMMA on a running channel stalls it until
+power-off, so the gamma bit may only change while the channel is being
+initialised.
+
+Add hvs5_pq_gamma for userspace to request the curve. The atomic check
+works out pq_to_sdr for the CRTC on channel 2 and, when it changes on a
+commit that allows a modeset, forces one, as the mode itself does not
+change. The channel init then sets the gamma bit from pq_to_sdr.
+---
+ drivers/gpu/drm/vc4/vc4_crtc.c |  1 +
+ drivers/gpu/drm/vc4/vc4_drv.h  |  5 +++
+ drivers/gpu/drm/vc4/vc4_hvs.c  | 61 +++++++++++++++++++++++++++++++++-
+ drivers/gpu/drm/vc4/vc4_kms.c  |  4 +++
+ 4 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/vc4/vc4_crtc.c b/drivers/gpu/drm/vc4/vc4_crtc.c
+index 9de390f..f608755 100644
+--- a/drivers/gpu/drm/vc4/vc4_crtc.c
++++ b/drivers/gpu/drm/vc4/vc4_crtc.c
+@@ -1131,6 +1131,7 @@ struct drm_crtc_state *vc4_crtc_duplicate_state(struct drm_crtc *crtc)
+ 	old_vc4_state = to_vc4_crtc_state(crtc->state);
+ 	vc4_state->margins = old_vc4_state->margins;
+ 	vc4_state->assigned_channel = old_vc4_state->assigned_channel;
++	vc4_state->pq_to_sdr = old_vc4_state->pq_to_sdr;
+ 
+ 	__drm_atomic_helper_crtc_duplicate_state(crtc, &vc4_state->base);
+ 	return &vc4_state->base;
+diff --git a/drivers/gpu/drm/vc4/vc4_drv.h b/drivers/gpu/drm/vc4/vc4_drv.h
+index d6e7ea1..199610a 100644
+--- a/drivers/gpu/drm/vc4/vc4_drv.h
++++ b/drivers/gpu/drm/vc4/vc4_drv.h
+@@ -686,6 +686,9 @@ struct vc4_crtc_state {
+ 
+ 	unsigned long hvs_load;
+ 
++	/* BCM2711: HVS5 PQ to SDR curve and gamut matrix in use. */
++	bool pq_to_sdr;
++
+ 	/* Transitional state below, only valid during atomic commits */
+ 	bool update_muxing;
+ };
+@@ -1090,6 +1093,8 @@ struct vc4_hvs *__vc4_hvs_alloc(struct vc4_dev *vc4,
+ 				struct platform_device *pdev);
+ void vc4_hvs_stop_channel(struct vc4_hvs *hvs, unsigned int output);
+ void vc5_hvs_pq_gamma_find_crtc(struct drm_device *dev);
++int vc5_hvs_pq_gamma_atomic_check(struct drm_device *dev,
++				  struct drm_atomic_state *state);
+ int vc4_hvs_get_fifo_from_output(struct vc4_hvs *hvs, unsigned int output);
+ u8 vc4_hvs_get_fifo_frame_count(struct vc4_hvs *hvs, unsigned int fifo);
+ void vc4_hvs_mark_dlist_entry_stale(struct vc4_hvs *hvs,
+diff --git a/drivers/gpu/drm/vc4/vc4_hvs.c b/drivers/gpu/drm/vc4/vc4_hvs.c
+index 386502e..a96cb75 100644
+--- a/drivers/gpu/drm/vc4/vc4_hvs.c
++++ b/drivers/gpu/drm/vc4/vc4_hvs.c
+@@ -25,6 +25,7 @@
+ #include <linux/moduleparam.h>
+ #include <linux/platform_device.h>
+ 
++#include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_vblank.h>
+@@ -972,6 +973,11 @@ module_param(hvs5_pq, bool, 0444);
+ MODULE_PARM_DESC(hvs5_pq,
+ 		 "BCM2711: load the PQ to SDR curve at boot, HDMI0 then takes HVS channel 2");
+ 
++static bool hvs5_pq_gamma;
++module_param(hvs5_pq_gamma, bool, 0644);
++MODULE_PARM_DESC(hvs5_pq_gamma,
++		 "BCM2711: apply the PQ to SDR curve on HDMI0 (on the next commit allowing a modeset)");
++
+ #define VC5_GAMMA_CHAN		2
+ 
+ /*
+@@ -1055,6 +1061,51 @@ static void vc5_hvs_gamma_load(struct vc4_hvs *hvs)
+ 		 VC5_GAMMA_CHAN);
+ }
+ 
++/*
++ * Decide whether a CRTC uses the PQ to SDR curve. The gamma bit may only
++ * change while the channel restarts, so a change is applied on the next
++ * mode change, or a modeset is forced when userspace allows one.
++ */
++int vc5_hvs_pq_gamma_atomic_check(struct drm_device *dev,
++				  struct drm_atomic_state *state)
++{
++	struct vc4_dev *vc4 = to_vc4_dev(dev);
++	struct drm_crtc_state *old_crtc_state, *new_crtc_state;
++	struct drm_crtc *crtc;
++	int i, ret;
++
++	if (vc4->gen != VC4_GEN_5 || !vc4->hvs || !vc4->hvs->vc5_gamma_loaded)
++		return 0;
++
++	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
++				      new_crtc_state, i) {
++		struct vc4_crtc_state *vc4_state =
++			to_vc4_crtc_state(new_crtc_state);
++		bool pq_to_sdr;
++
++		pq_to_sdr = new_crtc_state->active &&
++			    vc4_state->assigned_channel == VC5_GAMMA_CHAN &&
++			    READ_ONCE(hvs5_pq_gamma);
++		if (pq_to_sdr == vc4_state->pq_to_sdr)
++			continue;
++
++		if (old_crtc_state->active == new_crtc_state->active &&
++		    old_crtc_state->enable == new_crtc_state->enable &&
++		    drm_mode_equal(&old_crtc_state->mode, &new_crtc_state->mode)) {
++			if (!state->allow_modeset)
++				continue;
++			new_crtc_state->mode_changed = true;
++		}
++
++		vc4_state->pq_to_sdr = pq_to_sdr;
++		ret = drm_atomic_add_affected_planes(state, crtc);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
+ static int vc4_hvs_init_channel(struct vc4_hvs *hvs, struct drm_crtc *crtc,
+ 				struct drm_display_mode *mode, bool oneshot)
+ {
+@@ -1111,9 +1162,17 @@ static int vc4_hvs_init_channel(struct vc4_hvs *hvs, struct drm_crtc *crtc,
+ 	dispbkgndx &= ~SCALER_DISPBKGND_INTERLACE;
+ 
+ 	HVS_WRITE(SCALER_DISPBKGNDX(chan), dispbkgndx |
+-		  ((vc4->gen == VC4_GEN_4) ? SCALER_DISPBKGND_GAMMA : 0) |
++		  ((vc4->gen == VC4_GEN_4 ||
++		    (vc4_crtc_state->pq_to_sdr && chan == VC5_GAMMA_CHAN)) ?
++		   SCALER_DISPBKGND_GAMMA : 0) |
+ 		  (interlace ? SCALER_DISPBKGND_INTERLACE : 0));
+ 
++	if (vc4->gen == VC4_GEN_5 && chan == VC5_GAMMA_CHAN &&
++	    hvs->vc5_gamma_loaded)
++		drm_dbg(drm, "HVS5 gamma: channel %u %ux%u, curve %s\n", chan,
++			mode->hdisplay, mode->vdisplay,
++			vc4_crtc_state->pq_to_sdr ? "on" : "off");
++
+ 	/* Reload the LUT, since the SRAMs would have been disabled if
+ 	 * all CRTCs had SCALER_DISPBKGND_GAMMA unset at once.
+ 	 */
+diff --git a/drivers/gpu/drm/vc4/vc4_kms.c b/drivers/gpu/drm/vc4/vc4_kms.c
+index f6796cc..a24f070 100644
+--- a/drivers/gpu/drm/vc4/vc4_kms.c
++++ b/drivers/gpu/drm/vc4/vc4_kms.c
+@@ -1146,6 +1146,10 @@ vc4_atomic_check(struct drm_device *dev, struct drm_atomic_state *state)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = vc5_hvs_pq_gamma_atomic_check(dev, state);
++	if (ret)
++		return ret;
++
+ 	ret = vc4_ctm_atomic_check(dev, state);
+ 	if (ret < 0)
+ 		return ret;
+-- 
+2.53.0
+

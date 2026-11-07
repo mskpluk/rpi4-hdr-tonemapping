@@ -1,0 +1,98 @@
+From 8b5392dd0151a521a673229ff369c8f3af1a89c6 Mon Sep 17 00:00:00 2001
+From: Marcin <91057909+mskpluk@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 13:25:35 +0000
+Subject: [PATCH] [GUI] Reload the skin when the screen aspect ratio changes
+
+Windows kept in memory keep the skin coordinates they were loaded with.
+After switching from a 4:3 mode to 16:9 they are drawn in the 4:3 space
+and the whole GUI is squashed into the top three quarters of the screen.
+
+Reload the skin when the new resolution matches another skin resolution,
+except during video playback and screen calibration.
+
+Fixes #25875
+---
+ xbmc/addons/Skin.cpp                            |  9 +++++++++
+ xbmc/addons/Skin.h                              |  5 +++++
+ xbmc/application/ApplicationMessageHandling.cpp | 15 +++++++++++++++
+ 3 files changed, 29 insertions(+)
+
+diff --git a/xbmc/addons/Skin.cpp b/xbmc/addons/Skin.cpp
+index c9c893a..dcd0866 100644
+--- a/xbmc/addons/Skin.cpp
++++ b/xbmc/addons/Skin.cpp
+@@ -260,6 +260,15 @@ void CSkinInfo::Start()
+   }
+ }
+ 
++bool CSkinInfo::IsResolutionChanged() const
++{
++  if (m_resolutions.empty())
++    return false;
++
++  const RESOLUTION_INFO& target = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
++  return std::ranges::min_element(m_resolutions, closestRes(target))->strId != m_currentAspect;
++}
++
+ std::string CSkinInfo::GetSkinPath(const std::string& strFile,
+                                    RESOLUTION_INFO* res,
+                                    std::string_view strBaseDir /* = "" */) const
+diff --git a/xbmc/addons/Skin.h b/xbmc/addons/Skin.h
+index eca22b5..2469e68 100644
+--- a/xbmc/addons/Skin.h
++++ b/xbmc/addons/Skin.h
+@@ -180,6 +180,11 @@ public:
+ 
+   const std::string& GetCurrentAspect() const { return m_currentAspect; }
+ 
++  /*! \brief Check if the screen now matches another skin resolution than the
++   one the skin was loaded for, e.g. after switching from 4:3 to 16:9
++   */
++  bool IsResolutionChanged() const;
++
+   void LoadIncludes();
+ 
+   /*! \brief Load the defined skin timers
+diff --git a/xbmc/application/ApplicationMessageHandling.cpp b/xbmc/application/ApplicationMessageHandling.cpp
+index 27b733d..dde680a 100644
+--- a/xbmc/application/ApplicationMessageHandling.cpp
++++ b/xbmc/application/ApplicationMessageHandling.cpp
+@@ -17,6 +17,7 @@
+ #include "ServiceBroker.h"
+ #include "ServiceManager.h"
+ #include "Util.h"
++#include "addons/Skin.h"
+ #include "application/AppInboundProtocol.h"
+ #include "application/Application.h"
+ #include "application/ApplicationEnums.h"
+@@ -63,6 +64,7 @@
+ #include "utils/FileExtensionProvider.h"
+ #include "utils/URIUtils.h"
+ #include "video/VideoFileItemClassify.h"
++#include "windowing/GraphicContext.h"
+ #include "windowing/WinSystem.h"
+ 
+ #include <memory>
+@@ -488,6 +490,19 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
+         if (message.GetSenderId() == WINDOW_SETTINGS_PROFILES)
+           m_app.GetComponent<CApplicationSkinHandling>()->ReloadSkin(false);
+       }
++      else if (message.GetParam1() == GUI_MSG_WINDOW_RESIZE)
++      {
++        // Windows kept in memory still use the skin coordinates of the old
++        // aspect ratio. Leave video playback alone, its refresh rate switches
++        // may use other aspect ratios for a while, and the calibration window,
++        // which switches resolutions itself.
++        const auto skin = CServiceBroker::GetGUI()->GetSkinInfo();
++        if (skin && skin->IsResolutionChanged() &&
++            !m_app.GetComponent<CApplicationPlayer>()->IsPlayingVideo() &&
++            !CServiceBroker::GetWinSystem()->GetGfxContext().IsCalibrating())
++          CServiceBroker::GetAppMessenger()->PostMsg(TMSG_EXECUTE_BUILT_IN, -1, -1, nullptr,
++                                                     "ReloadSkin");
++      }
+       else if (message.GetParam1() == GUI_MSG_UPDATE_ITEM && message.GetItem())
+       {
+         CFileItemPtr item = std::static_pointer_cast<CFileItem>(message.GetItem());
+-- 
+2.53.0
+

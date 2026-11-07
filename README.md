@@ -200,8 +200,10 @@ device, not just the Pi.
   kept in memory stayed in the 4:3 skin coordinates, and the whole GUI was
   squashed into the top three quarters of the screen
   ([#25875](https://github.com/xbmc/xbmc/issues/25875)). The skin is now
-  reloaded when the aspect ratio changes, except during video playback and
-  screen calibration.
+  reloaded once the aspect ratio has settled for 500 ms, except during
+  screen calibration; a change during video playback is picked up when
+  playback stops. Submitted upstream as
+  [xbmc/xbmc#30385](https://github.com/xbmc/xbmc/pull/30385).
 - **No display hotplug on GBM.** A TV in standby can return an all-zero EDID.
   The Samsung S85F does, and Kodi then only gets the VESA fallback modes. When
   the TV wakes, the kernel reads the EDID and sends a hotplug uevent, but

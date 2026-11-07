@@ -1,27 +1,40 @@
-From 8b5392dd0151a521a673229ff369c8f3af1a89c6 Mon Sep 17 00:00:00 2001
+From 14a7416880bbad95b9c82e3ce0f4fc8b46be1cc5 Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 13:25:35 +0000
 Subject: [PATCH] [GUI] Reload the skin when the screen aspect ratio changes
 
 Windows kept in memory keep the skin coordinates they were loaded with.
-After switching from a 4:3 mode to 16:9 they are drawn in the 4:3 space
-and the whole GUI is squashed into the top three quarters of the screen.
+After the screen or the window changes to another aspect ratio, they are
+drawn in the old coordinate space, e.g. squashed into the top three
+quarters of a 16:9 screen after starting in 4:3.
 
-Reload the skin when the new resolution matches another skin resolution,
-except during video playback and screen calibration.
+Reload the skin when the new resolution makes the skin pick another of
+its resolutions, except during screen calibration. A resize during video
+playback is picked up when playback stops. The reload waits until the
+resizes have settled for 500 ms, so dragging a window edge across several
+aspect ratios reloads the skin once.
 
 Fixes #25875
 ---
- xbmc/addons/Skin.cpp                            |  9 +++++++++
- xbmc/addons/Skin.h                              |  5 +++++
- xbmc/application/ApplicationMessageHandling.cpp | 15 +++++++++++++++
- 3 files changed, 29 insertions(+)
+ xbmc/addons/Skin.cpp                          | 17 +++++-
+ xbmc/addons/Skin.h                            |  7 +++
+ .../ApplicationMessageHandling.cpp            | 58 ++++++++++++++++++-
+ xbmc/application/ApplicationMessageHandling.h |  4 ++
+ 4 files changed, 83 insertions(+), 3 deletions(-)
 
 diff --git a/xbmc/addons/Skin.cpp b/xbmc/addons/Skin.cpp
-index c9c893a..dcd0866 100644
+index c9c893a..418b09c 100644
 --- a/xbmc/addons/Skin.cpp
 +++ b/xbmc/addons/Skin.cpp
-@@ -260,6 +260,15 @@ void CSkinInfo::Start()
+@@ -255,11 +255,24 @@ void CSkinInfo::Start()
+   {
+     // find the closest resolution
+     const RESOLUTION_INFO& target = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
+-    const RESOLUTION_INFO& res = *std::ranges::min_element(m_resolutions, closestRes(target));
+-    m_currentAspect = res.strId;
++    const auto res = std::ranges::min_element(m_resolutions, closestRes(target));
++    m_currentAspect = res->strId;
++    m_currentResolution = std::ranges::distance(m_resolutions.begin(), res);
    }
  }
  
@@ -30,18 +43,29 @@ index c9c893a..dcd0866 100644
 +  if (m_resolutions.empty())
 +    return false;
 +
++  // compare the entry, resolutions found in the skin directory have no aspect string
 +  const RESOLUTION_INFO& target = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
-+  return std::ranges::min_element(m_resolutions, closestRes(target))->strId != m_currentAspect;
++  return std::ranges::distance(m_resolutions.begin(),
++                               std::ranges::min_element(m_resolutions, closestRes(target))) !=
++         m_currentResolution;
 +}
 +
  std::string CSkinInfo::GetSkinPath(const std::string& strFile,
                                     RESOLUTION_INFO* res,
                                     std::string_view strBaseDir /* = "" */) const
 diff --git a/xbmc/addons/Skin.h b/xbmc/addons/Skin.h
-index eca22b5..2469e68 100644
+index eca22b5..e6077e2 100644
 --- a/xbmc/addons/Skin.h
 +++ b/xbmc/addons/Skin.h
-@@ -180,6 +180,11 @@ public:
+@@ -14,6 +14,7 @@
+ #include "threads/CriticalSection.h"
+ #include "windowing/GraphicContext.h" // needed for the RESOLUTION members
+ 
++#include <cstddef>
+ #include <map>
+ #include <memory>
+ #include <set>
+@@ -180,6 +181,11 @@ public:
  
    const std::string& GetCurrentAspect() const { return m_currentAspect; }
  
@@ -53,8 +77,16 @@ index eca22b5..2469e68 100644
    void LoadIncludes();
  
    /*! \brief Load the defined skin timers
+@@ -291,6 +297,7 @@ protected:
+   float m_effectsSlowDown;
+   CGUIIncludes m_includes;
+   std::string m_currentAspect;
++  std::ptrdiff_t m_currentResolution{-1}; // index in m_resolutions
+ 
+   std::vector<CStartupWindow> m_startupWindows;
+   bool m_debugging;
 diff --git a/xbmc/application/ApplicationMessageHandling.cpp b/xbmc/application/ApplicationMessageHandling.cpp
-index 27b733d..dde680a 100644
+index 27b733d..0fca5a2 100644
 --- a/xbmc/application/ApplicationMessageHandling.cpp
 +++ b/xbmc/application/ApplicationMessageHandling.cpp
 @@ -17,6 +17,7 @@
@@ -65,34 +97,126 @@ index 27b733d..dde680a 100644
  #include "application/AppInboundProtocol.h"
  #include "application/Application.h"
  #include "application/ApplicationEnums.h"
-@@ -63,6 +64,7 @@
+@@ -63,8 +64,10 @@
  #include "utils/FileExtensionProvider.h"
  #include "utils/URIUtils.h"
  #include "video/VideoFileItemClassify.h"
 +#include "windowing/GraphicContext.h"
  #include "windowing/WinSystem.h"
  
++#include <chrono>
  #include <memory>
-@@ -488,6 +490,19 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
+ 
+ #ifdef TARGET_ANDROID
+@@ -97,12 +100,55 @@ public:
+ private:
+   const CFileItem m_item;
+ };
++
++// Windows kept in memory keep the skin coordinates of the aspect ratio they
++// were loaded for. Leave video playback alone, its refresh rate switches may
++// use other aspect ratios for a while, and the calibration window, which
++// switches resolutions itself.
++bool IsSkinReloadNeeded()
++{
++  // the deferred check may run while Kodi is shutting down
++  const auto gui = CServiceBroker::GetGUI();
++  if (!gui)
++    return false;
++
++  const auto skin = gui->GetSkinInfo();
++  return skin && skin->IsResolutionChanged() &&
++         !CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>()->IsPlayingVideo() &&
++         !CServiceBroker::GetWinSystem()->GetGfxContext().IsCalibrating();
++}
++
++void ReloadSkinIfNeeded(void*)
++{
++  if (IsSkinReloadNeeded())
++    CServiceBroker::GetAppComponents().GetComponent<CApplicationSkinHandling>()->ReloadSkin();
++}
++
++MESSAGING::ThreadMessageCallback reloadSkinCallback{ReloadSkinIfNeeded, nullptr};
++
++// resizing a window sends a resize for every step, reload once it settles
++constexpr auto SKIN_RELOAD_DELAY = std::chrono::milliseconds(500);
+ } // unnamed namespace
+ 
+ CApplicationMessageHandling::CApplicationMessageHandling(CApplication& app)
+   : CAppInboundProtocol(app),
+-    m_app(app)
++    m_app(app),
++    m_skinReloadTimer(
++        []
++        {
++          if (const auto messenger = CServiceBroker::GetAppMessenger())
++            messenger->PostMsg(TMSG_CALLBACK, -1, -1, &reloadSkinCallback);
++        })
++{
++}
++
++void CApplicationMessageHandling::ScheduleSkinReload()
+ {
++  // the timer callback checks again whether the reload is needed
++  if (m_skinReloadTimer.IsRunning())
++    m_skinReloadTimer.RestartAsync(SKIN_RELOAD_DELAY);
++  else
++    m_skinReloadTimer.Start(SKIN_RELOAD_DELAY);
+ }
+ 
+ void CApplicationMessageHandling::OnApplicationMessage(MESSAGING::ThreadMessage* pMsg)
+@@ -488,6 +534,11 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
          if (message.GetSenderId() == WINDOW_SETTINGS_PROFILES)
            m_app.GetComponent<CApplicationSkinHandling>()->ReloadSkin(false);
        }
 +      else if (message.GetParam1() == GUI_MSG_WINDOW_RESIZE)
 +      {
-+        // Windows kept in memory still use the skin coordinates of the old
-+        // aspect ratio. Leave video playback alone, its refresh rate switches
-+        // may use other aspect ratios for a while, and the calibration window,
-+        // which switches resolutions itself.
-+        const auto skin = CServiceBroker::GetGUI()->GetSkinInfo();
-+        if (skin && skin->IsResolutionChanged() &&
-+            !m_app.GetComponent<CApplicationPlayer>()->IsPlayingVideo() &&
-+            !CServiceBroker::GetWinSystem()->GetGfxContext().IsCalibrating())
-+          CServiceBroker::GetAppMessenger()->PostMsg(TMSG_EXECUTE_BUILT_IN, -1, -1, nullptr,
-+                                                     "ReloadSkin");
++        if (IsSkinReloadNeeded())
++          ScheduleSkinReload();
 +      }
        else if (message.GetParam1() == GUI_MSG_UPDATE_ITEM && message.GetItem())
        {
          CFileItemPtr item = std::static_pointer_cast<CFileItem>(message.GetItem());
+@@ -650,6 +701,9 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
+ 
+     case GUI_MSG_PLAYBACK_STOPPED:
+     {
++      // a resize during playback was left alone
++      ScheduleSkinReload();
++
+       CServiceBroker::GetPVRManager().OnPlaybackStopped(m_app.CurrentFileItem());
+       CServiceBroker::GetFavouritesService().OnPlaybackStopped(m_app.CurrentFileItem());
+ 
+@@ -674,6 +728,8 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
+ 
+     case GUI_MSG_PLAYBACK_ENDED:
+     {
++      ScheduleSkinReload();
++
+       CServiceBroker::GetPVRManager().OnPlaybackEnded(m_app.CurrentFileItem());
+       CServiceBroker::GetFavouritesService().OnPlaybackEnded(m_app.CurrentFileItem());
+ 
+diff --git a/xbmc/application/ApplicationMessageHandling.h b/xbmc/application/ApplicationMessageHandling.h
+index dea4246..28af796 100644
+--- a/xbmc/application/ApplicationMessageHandling.h
++++ b/xbmc/application/ApplicationMessageHandling.h
+@@ -9,6 +9,7 @@
+ #pragma once
+ 
+ #include "application/AppInboundProtocol.h"
++#include "threads/Timer.h"
+ 
+ class CApplication;
+ class CGUIMessage;
+@@ -26,5 +27,8 @@ public:
+   bool OnMessage(const CGUIMessage& message);
+ 
+ private:
++  void ScheduleSkinReload();
++
+   CApplication& m_app;
++  CTimer m_skinReloadTimer;
+ };
 -- 
 2.53.0
 

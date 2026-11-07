@@ -7,6 +7,12 @@ controller (HVS), so tone mapping costs no GPU time. Kodi composites menus,
 OSD and subtitles through the inverse of the curve, so they still look like
 SDR.
 
+**Development build.** LibreELEC 13 has not been released yet; the latest
+release is 12.2.1. This is built from LibreELEC master of 6 November 2026,
+the same code as the LibreELEC 13 nightlies, with Kodi 22 from the Piers
+branch, after 22.0 RC1 and before the final release. Expect the bugs of a
+development version.
+
 Tested on a Raspberry Pi 4 Model B with a Samsung S85F, at 1080p and 4K. All
 15 HDR test files (HDR10, HDR10+, Dolby Vision with an HDR10 base layer and
 Dolby Vision profile 5, 4K at 23.976 to 59.94 fps) play at full frame rate

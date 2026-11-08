@@ -370,11 +370,13 @@ file works both ways:
 - **Fresh install:** write it to an SD card with Raspberry Pi Imager,
   LibreELEC USB-SD Creator or balenaEtcher. It does not need to be unpacked
   first.
-- **Update** of an existing LibreELEC 13 install: while LibreELEC is
+- **Update** of an existing LibreELEC 12 or 13 install: while LibreELEC is
   running, copy it to `/storage/.update`, through the `Update` Samba share
   (`\\LIBREELEC\Update`) or over SSH, and reboot. The update runs during
   that boot. The directory is on the ext4 STORAGE partition, so a PC with
-  the card in a reader cannot reach it.
+  the card in a reader cannot reach it. Coming from 12 also moves Kodi 21
+  to 22, which converts its databases and settings one way, so going back
+  to 12 needs a backup made before the update.
 
 Then:
 

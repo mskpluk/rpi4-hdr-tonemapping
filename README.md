@@ -202,7 +202,9 @@ device, not just the Pi.
   ([#25875](https://github.com/xbmc/xbmc/issues/25875)). The skin is now
   reloaded once the aspect ratio has settled for 500 ms, except during
   screen calibration; a change during video playback is picked up when
-  playback stops. Submitted upstream as
+  playback stops. While an add-on window or dialog is open, the reload
+  waits until it closes, as it would empty what the add-on filled in from
+  code. Submitted upstream as
   [xbmc/xbmc#30385](https://github.com/xbmc/xbmc/pull/30385).
 - **No display hotplug on GBM.** A TV in standby can return an all-zero EDID.
   The Samsung S85F does, and Kodi then only gets the VESA fallback modes. When

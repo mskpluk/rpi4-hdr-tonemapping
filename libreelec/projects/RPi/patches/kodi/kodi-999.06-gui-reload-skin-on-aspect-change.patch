@@ -1,4 +1,4 @@
-From 14a7416880bbad95b9c82e3ce0f4fc8b46be1cc5 Mon Sep 17 00:00:00 2001
+From 46440e3f05005ba0aea81ee6001d696338560b59 Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 13:25:35 +0000
 Subject: [PATCH] [GUI] Reload the skin when the screen aspect ratio changes
@@ -10,17 +10,19 @@ quarters of a 16:9 screen after starting in 4:3.
 
 Reload the skin when the new resolution makes the skin pick another of
 its resolutions, except during screen calibration. A resize during video
-playback is picked up when playback stops. The reload waits until the
-resizes have settled for 500 ms, so dragging a window edge across several
-aspect ratios reloads the skin once.
+playback is picked up when playback stops. While Kodi is starting or an
+add-on window or dialog is open, the reload waits, as it would empty what
+the add-on filled in from code. The reload waits until the resizes have
+settled for 500 ms, so dragging a window edge across several aspect
+ratios reloads the skin once.
 
 Fixes #25875
 ---
- xbmc/addons/Skin.cpp                          | 17 +++++-
- xbmc/addons/Skin.h                            |  7 +++
- .../ApplicationMessageHandling.cpp            | 58 ++++++++++++++++++-
- xbmc/application/ApplicationMessageHandling.h |  4 ++
- 4 files changed, 83 insertions(+), 3 deletions(-)
+ xbmc/addons/Skin.cpp                          | 17 +++-
+ xbmc/addons/Skin.h                            |  7 ++
+ .../ApplicationMessageHandling.cpp            | 84 ++++++++++++++++++-
+ xbmc/application/ApplicationMessageHandling.h | 10 +++
+ 4 files changed, 115 insertions(+), 3 deletions(-)
 
 diff --git a/xbmc/addons/Skin.cpp b/xbmc/addons/Skin.cpp
 index c9c893a..418b09c 100644
@@ -86,7 +88,7 @@ index eca22b5..e6077e2 100644
    std::vector<CStartupWindow> m_startupWindows;
    bool m_debugging;
 diff --git a/xbmc/application/ApplicationMessageHandling.cpp b/xbmc/application/ApplicationMessageHandling.cpp
-index 27b733d..0fca5a2 100644
+index 27b733d..d51d87c 100644
 --- a/xbmc/application/ApplicationMessageHandling.cpp
 +++ b/xbmc/application/ApplicationMessageHandling.cpp
 @@ -17,6 +17,7 @@
@@ -108,7 +110,7 @@ index 27b733d..0fca5a2 100644
  #include <memory>
  
  #ifdef TARGET_ANDROID
-@@ -97,12 +100,55 @@ public:
+@@ -97,14 +100,83 @@ public:
  private:
    const CFileItem m_item;
  };
@@ -130,13 +132,18 @@ index 27b733d..0fca5a2 100644
 +         !CServiceBroker::GetWinSystem()->GetGfxContext().IsCalibrating();
 +}
 +
-+void ReloadSkinIfNeeded(void*)
++// Add-ons fill their windows and dialogs from code, and a skin reload would
++// leave them empty.
++bool IsAddonWindowOpen()
 +{
-+  if (IsSkinReloadNeeded())
-+    CServiceBroker::GetAppComponents().GetComponent<CApplicationSkinHandling>()->ReloadSkin();
++  const auto& windowManager = CServiceBroker::GetGUI()->GetWindowManager();
++  for (const int id : {windowManager.GetActiveWindow(), windowManager.GetActiveWindowOrDialog()})
++  {
++    if (windowManager.IsPythonWindow(id) || windowManager.IsAddonWindow(id))
++      return true;
++  }
++  return false;
 +}
-+
-+MESSAGING::ThreadMessageCallback reloadSkinCallback{ReloadSkinIfNeeded, nullptr};
 +
 +// resizing a window sends a resize for every step, reload once it settles
 +constexpr auto SKIN_RELOAD_DELAY = std::chrono::milliseconds(500);
@@ -146,26 +153,49 @@ index 27b733d..0fca5a2 100644
    : CAppInboundProtocol(app),
 -    m_app(app)
 +    m_app(app),
++    m_reloadSkinCallback(std::make_unique<MESSAGING::ThreadMessageCallback>(
++        MESSAGING::ThreadMessageCallback{ReloadSkinIfNeeded, this})),
 +    m_skinReloadTimer(
-+        []
++        [this]
 +        {
 +          if (const auto messenger = CServiceBroker::GetAppMessenger())
-+            messenger->PostMsg(TMSG_CALLBACK, -1, -1, &reloadSkinCallback);
++            messenger->PostMsg(TMSG_CALLBACK, -1, -1, m_reloadSkinCallback.get());
 +        })
+ {
+ }
+ 
++CApplicationMessageHandling::~CApplicationMessageHandling() = default;
++
++void CApplicationMessageHandling::ReloadSkinIfNeeded(void* data)
 +{
++  if (!IsSkinReloadNeeded())
++    return;
++
++  // ReloadSkin() drops requests while Kodi is starting, and a reload would empty
++  // add-on windows, so try again later
++  auto* handling = static_cast<CApplicationMessageHandling*>(data);
++  if (!handling->m_app.IsInitialized() || IsAddonWindowOpen())
++  {
++    handling->ScheduleSkinReload();
++    return;
++  }
++
++  CServiceBroker::GetAppComponents().GetComponent<CApplicationSkinHandling>()->ReloadSkin();
 +}
 +
 +void CApplicationMessageHandling::ScheduleSkinReload()
- {
++{
 +  // the timer callback checks again whether the reload is needed
 +  if (m_skinReloadTimer.IsRunning())
 +    m_skinReloadTimer.RestartAsync(SKIN_RELOAD_DELAY);
 +  else
 +    m_skinReloadTimer.Start(SKIN_RELOAD_DELAY);
- }
- 
++}
++
  void CApplicationMessageHandling::OnApplicationMessage(MESSAGING::ThreadMessage* pMsg)
-@@ -488,6 +534,11 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
+ {
+   uint32_t msg = pMsg->dwMessage;
+@@ -488,6 +560,11 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
          if (message.GetSenderId() == WINDOW_SETTINGS_PROFILES)
            m_app.GetComponent<CApplicationSkinHandling>()->ReloadSkin(false);
        }
@@ -177,7 +207,7 @@ index 27b733d..0fca5a2 100644
        else if (message.GetParam1() == GUI_MSG_UPDATE_ITEM && message.GetItem())
        {
          CFileItemPtr item = std::static_pointer_cast<CFileItem>(message.GetItem());
-@@ -650,6 +701,9 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
+@@ -650,6 +727,9 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
  
      case GUI_MSG_PLAYBACK_STOPPED:
      {
@@ -187,7 +217,7 @@ index 27b733d..0fca5a2 100644
        CServiceBroker::GetPVRManager().OnPlaybackStopped(m_app.CurrentFileItem());
        CServiceBroker::GetFavouritesService().OnPlaybackStopped(m_app.CurrentFileItem());
  
-@@ -674,6 +728,8 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
+@@ -674,6 +754,8 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
  
      case GUI_MSG_PLAYBACK_ENDED:
      {
@@ -197,24 +227,40 @@ index 27b733d..0fca5a2 100644
        CServiceBroker::GetFavouritesService().OnPlaybackEnded(m_app.CurrentFileItem());
  
 diff --git a/xbmc/application/ApplicationMessageHandling.h b/xbmc/application/ApplicationMessageHandling.h
-index dea4246..28af796 100644
+index dea4246..a8d809f 100644
 --- a/xbmc/application/ApplicationMessageHandling.h
 +++ b/xbmc/application/ApplicationMessageHandling.h
-@@ -9,6 +9,7 @@
+@@ -9,22 +9,32 @@
  #pragma once
  
  #include "application/AppInboundProtocol.h"
 +#include "threads/Timer.h"
++
++#include <memory>
  
  class CApplication;
  class CGUIMessage;
-@@ -26,5 +27,8 @@ public:
+ namespace KODI::MESSAGING
+ {
+ class ThreadMessage;
++struct ThreadMessageCallback;
+ }
+ 
+ class CApplicationMessageHandling : public CAppInboundProtocol
+ {
+ public:
+   explicit CApplicationMessageHandling(CApplication& app);
++  ~CApplicationMessageHandling();
+ 
+   void OnApplicationMessage(KODI::MESSAGING::ThreadMessage* pMsg);
    bool OnMessage(const CGUIMessage& message);
  
  private:
++  static void ReloadSkinIfNeeded(void* data);
 +  void ScheduleSkinReload();
 +
    CApplication& m_app;
++  std::unique_ptr<KODI::MESSAGING::ThreadMessageCallback> m_reloadSkinCallback;
 +  CTimer m_skinReloadTimer;
  };
 -- 

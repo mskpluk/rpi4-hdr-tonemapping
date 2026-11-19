@@ -1,4 +1,4 @@
-From 40f1d9aa4cfca2a2aa4d759e9990733c84ac3002 Mon Sep 17 00:00:00 2001
+From 76a97fad427f46ef5f1ced264bf932b7923d8ca8 Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 09:21:52 +0000
 Subject: [PATCH] [DRMPRIME] Add the hardware BT.2390 tone mapping setting
@@ -21,10 +21,10 @@ renderers have no BT.2390, so they treat a saved BT.2390 as Hable.
  10 files changed, 68 insertions(+), 20 deletions(-)
 
 diff --git a/addons/resource.language.en_gb/resources/strings.po b/addons/resource.language.en_gb/resources/strings.po
-index 58ddc85..c218a6e 100644
+index d22b409f..8104e608 100644
 --- a/addons/resource.language.en_gb/resources/strings.po
 +++ b/addons/resource.language.en_gb/resources/strings.po
-@@ -22711,7 +22711,10 @@ msgctxt "#36558"
+@@ -22734,7 +22734,10 @@ msgctxt "#36558"
  msgid "Hable"
  msgstr ""
  
@@ -37,10 +37,10 @@ index 58ddc85..c218a6e 100644
  #: system/settings/settings.xml
  msgctxt "#36560"
 diff --git a/xbmc/application/Application.cpp b/xbmc/application/Application.cpp
-index 531130c..5cd3b5e 100644
+index fde4e79e..dcd1bbbc 100644
 --- a/xbmc/application/Application.cpp
 +++ b/xbmc/application/Application.cpp
-@@ -1089,10 +1089,18 @@ bool CApplication::OnAction(const CAction &action)
+@@ -1095,10 +1095,18 @@ bool CApplication::OnAction(const CAction &action)
      if (appPlayer->IsPlayingVideo())
      {
        CVideoSettings vs = appPlayer->GetVideoSettings();
@@ -62,7 +62,7 @@ index 531130c..5cd3b5e 100644
  
        appPlayer->SetVideoSettings(vs);
  
-@@ -1108,6 +1116,9 @@ bool CApplication::OnAction(const CAction &action)
+@@ -1114,6 +1122,9 @@ bool CApplication::OnAction(const CAction &action)
          case VS_TONEMAPMETHOD_HABLE:
            code = 36558;
            break;
@@ -73,10 +73,10 @@ index 531130c..5cd3b5e 100644
            throw std::logic_error("Tonemapping method not found. Did you forget to add a mapping?");
        }
 diff --git a/xbmc/cores/IPlayer.h b/xbmc/cores/IPlayer.h
-index 5f96bc3..b99bf60 100644
+index 19b55517..b6d0ddfc 100644
 --- a/xbmc/cores/IPlayer.h
 +++ b/xbmc/cores/IPlayer.h
-@@ -82,7 +82,8 @@ enum ERENDERFEATURE
+@@ -87,7 +87,8 @@ enum ERENDERFEATURE
    RENDERFEATURE_VERTICAL_SHIFT,
    RENDERFEATURE_PIXEL_RATIO,
    RENDERFEATURE_POSTPROCESS,
@@ -87,7 +87,7 @@ index 5f96bc3..b99bf60 100644
  
  class IPlayer
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
-index ee64ed2..cb124fa 100644
+index ee64ed20..cb124fa8 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 @@ -264,6 +264,12 @@ void CRendererDRMPRIME::RenderUpdate(
@@ -124,7 +124,7 @@ index ee64ed2..cb124fa 100644
      return;
  
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
-index 5170dfe..291ef6c 100644
+index 5170dfeb..291ef6ce 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 @@ -54,6 +54,7 @@ private:
@@ -136,7 +136,7 @@ index 5170dfe..291ef6c 100644
    CRect m_planeDestRect;
  
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp
-index 3be87a6..229b165 100644
+index 3be87a62..229b1657 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGL.cpp
 @@ -997,7 +997,7 @@ void CLinuxRendererGL::LoadShaders(int field)
@@ -158,7 +158,7 @@ index 3be87a6..229b165 100644
    if (buf.m_srcPrimaries != m_srcPrimaries)
    {
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp
-index 2762bc3..c8b6232 100644
+index 2762bc36..c8b62322 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.cpp
 @@ -964,7 +964,7 @@ void CLinuxRendererGLES::LoadShaders(int field)
@@ -180,7 +180,7 @@ index 2762bc3..c8b6232 100644
    if (buf.m_srcPrimaries != m_srcPrimaries)
    {
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp
-index bc5d23f..d893932 100644
+index bc5d23f0..d893932f 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/windows/RendererBase.cpp
 @@ -496,7 +496,7 @@ void CRendererBase::UpdateVideoFilters()
@@ -193,7 +193,7 @@ index bc5d23f..d893932 100644
    bool isHDRPQ = (buf->color_transfer == AVCOL_TRC_SMPTE2084 && buf->primaries == AVCOL_PRI_BT2020);
  
 diff --git a/xbmc/cores/VideoSettings.h b/xbmc/cores/VideoSettings.h
-index 82779fb..c0c11bb 100644
+index 82779fb2..c0c11bbb 100644
 --- a/xbmc/cores/VideoSettings.h
 +++ b/xbmc/cores/VideoSettings.h
 @@ -160,9 +160,16 @@ enum ETONEMAPMETHOD
@@ -222,7 +222,7 @@ index 82779fb..c0c11bb 100644
  
    static_assert(VS_TONEMAPMETHOD_MAX == tonemapMethodMap.size(),
 diff --git a/xbmc/video/dialogs/GUIDialogVideoSettings.cpp b/xbmc/video/dialogs/GUIDialogVideoSettings.cpp
-index 4f42759..8f31ca6 100644
+index 4f427592..8f31ca6a 100644
 --- a/xbmc/video/dialogs/GUIDialogVideoSettings.cpp
 +++ b/xbmc/video/dialogs/GUIDialogVideoSettings.cpp
 @@ -444,15 +444,29 @@ void CGUIDialogVideoSettings::InitializeSettings()

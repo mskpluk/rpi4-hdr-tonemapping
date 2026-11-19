@@ -1,4 +1,4 @@
-From 4d254229f56393e63c9792ef73f3bda8ac5c2ddc Mon Sep 17 00:00:00 2001
+From 3a7c1a18d1343ea9baf86107bd9f78b21c453d66 Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 14:41:40 +0000
 Subject: [PATCH] [GBM] Update the resolutions on display hotplug
@@ -23,7 +23,7 @@ A playing video and open modal dialogs are left alone until they end.
  6 files changed, 252 insertions(+), 10 deletions(-)
 
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
-index 5d36621..aa3ebe0 100644
+index 5d366212..aa3ebe02 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
 @@ -12,10 +12,14 @@
@@ -286,7 +286,7 @@ index 5d36621..aa3ebe0 100644
  
    return caps;
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
-index 60b6752..257c09c 100644
+index 60b6752b..257c09cd 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.h
 +++ b/xbmc/windowing/gbm/WinSystemGbm.h
 @@ -18,12 +18,15 @@
@@ -346,7 +346,7 @@ index 60b6752..257c09c 100644
  
  } // namespace GBM
 diff --git a/xbmc/windowing/gbm/drm/DRMConnector.cpp b/xbmc/windowing/gbm/drm/DRMConnector.cpp
-index 799b59b..38d8746 100644
+index 799b59b0..38d87467 100644
 --- a/xbmc/windowing/gbm/drm/DRMConnector.cpp
 +++ b/xbmc/windowing/gbm/drm/DRMConnector.cpp
 @@ -12,6 +12,7 @@
@@ -399,7 +399,7 @@ index 799b59b..38d8746 100644
  {
    auto typeName = connectorTypeNames.find(m_connector->connector_type);
 diff --git a/xbmc/windowing/gbm/drm/DRMConnector.h b/xbmc/windowing/gbm/drm/DRMConnector.h
-index cde242d..f834f7b 100644
+index cde242d4..f834f7b4 100644
 --- a/xbmc/windowing/gbm/drm/DRMConnector.h
 +++ b/xbmc/windowing/gbm/drm/DRMConnector.h
 @@ -38,6 +38,10 @@ public:
@@ -414,7 +414,7 @@ index cde242d..f834f7b 100644
    std::vector<uint8_t> GetEDID() const;
  
 diff --git a/xbmc/windowing/gbm/drm/DRMUtils.cpp b/xbmc/windowing/gbm/drm/DRMUtils.cpp
-index 6985b88..61ab770 100644
+index 6985b887..61ab7706 100644
 --- a/xbmc/windowing/gbm/drm/DRMUtils.cpp
 +++ b/xbmc/windowing/gbm/drm/DRMUtils.cpp
 @@ -121,6 +121,26 @@ drm_fb* CDRMUtils::DrmFbGetFromBo(struct gbm_bo* bo)
@@ -445,7 +445,7 @@ index 6985b88..61ab770 100644
  {
    if (m_mode)
 diff --git a/xbmc/windowing/gbm/drm/DRMUtils.h b/xbmc/windowing/gbm/drm/DRMUtils.h
-index db4d756..12734d2 100644
+index db4d7569..12734d2b 100644
 --- a/xbmc/windowing/gbm/drm/DRMUtils.h
 +++ b/xbmc/windowing/gbm/drm/DRMUtils.h
 @@ -82,6 +82,9 @@ public:

@@ -1,4 +1,4 @@
-From 23ad442a50fb032d985a223f2d4f4ab4e886fab4 Mon Sep 17 00:00:00 2001
+From a31c5bbf89093396081e3d192d752373d239972e Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 09:31:37 +0000
 Subject: [PATCH] [GBM] Composite the GUI through the inverse Raspberry Pi 4
@@ -22,7 +22,7 @@ off.
  8 files changed, 160 insertions(+), 13 deletions(-)
 
 diff --git a/system/shaders/GLES/2.0/gles_gui_composite.frag b/system/shaders/GLES/2.0/gles_gui_composite.frag
-index 4cfd4fd..2076418 100644
+index 4cfd4fdd..2076418b 100644
 --- a/system/shaders/GLES/2.0/gles_gui_composite.frag
 +++ b/system/shaders/GLES/2.0/gles_gui_composite.frag
 @@ -15,6 +15,8 @@ uniform sampler2D u_lutDegamma; // sRGB -> linear LUT (IEC 61966-2-1)
@@ -56,7 +56,7 @@ index 4cfd4fd..2076418 100644
    vec3 linear = vec3(
      texture2D(u_lutDegamma, vec2(gui.r, 0.5)).r,
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
-index 792c1b5..83e3e87 100644
+index 792c1b50..83e3e874 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 @@ -310,18 +310,18 @@ void CRendererDRMPRIME::ConfigureHDR()
@@ -113,7 +113,7 @@ index 792c1b5..83e3e87 100644
    winSystem->SetColorimetry(enable ? nullptr : &m_picture);
    m_colorimetrySet = true;
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
-index 30e3de2..397275e 100644
+index 30e3de25..397275ea 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 @@ -58,6 +58,7 @@ private:
@@ -125,7 +125,7 @@ index 30e3de2..397275e 100644
    bool m_toneMappingAllowed = false;
    bool m_hwToneMapping = false;
 diff --git a/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp b/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp
-index 77dc713..23ad39e 100644
+index 77dc7138..23ad39ef 100644
 --- a/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp
 +++ b/xbmc/rendering/gles/GuiCompositeShaderGLES.cpp
 @@ -63,6 +63,7 @@ void CGuiCompositeShaderGLES::OnCompiledAndLinked()
@@ -184,7 +184,7 @@ index 77dc713..23ad39e 100644
 +  return true;
 +}
 diff --git a/xbmc/rendering/gles/GuiCompositeShaderGLES.h b/xbmc/rendering/gles/GuiCompositeShaderGLES.h
-index 9a1f83f..d06631c 100644
+index 9a1f83f7..d06631ca 100644
 --- a/xbmc/rendering/gles/GuiCompositeShaderGLES.h
 +++ b/xbmc/rendering/gles/GuiCompositeShaderGLES.h
 @@ -22,6 +22,11 @@ public:
@@ -224,7 +224,7 @@ index 9a1f83f..d06631c 100644
 +  GLint m_hHvsCurve{-1};
  };
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
-index 95ad05b..5d36621 100644
+index 95ad05b3..5d366212 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
 @@ -29,7 +29,11 @@
@@ -319,7 +319,7 @@ index 95ad05b..5d36621 100644
 +  return inverse;
 +}
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
-index 92ff5aa..60b6752 100644
+index 92ff5aa8..60b6752b 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.h
 +++ b/xbmc/windowing/gbm/WinSystemGbm.h
 @@ -19,6 +19,7 @@
@@ -343,7 +343,7 @@ index 92ff5aa..60b6752 100644
  
    // holding the returned reference defers video plane teardown until it is released
 diff --git a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
-index b3eb401..faf6e7f 100644
+index b3eb401f..faf6e7f0 100644
 --- a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
 @@ -210,7 +210,12 @@ bool CWinSystemGbmGLESContext::SetGuiCompositing(int colorTransfer)

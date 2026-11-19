@@ -1,4 +1,4 @@
-From 51b1c4b914d24a81b763e8ce227b4b63131f1f59 Mon Sep 17 00:00:00 2001
+From 02dddfc647b0131f21d7eb4b2e41a1592dd83f6a Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 09:19:45 +0000
 Subject: [PATCH] [DRMPRIME] Map PQ to SDR with the Raspberry Pi 4 HVS curve
@@ -22,7 +22,7 @@ on.
  4 files changed, 84 insertions(+)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
-index 40556ef..ee64ed2 100644
+index 40556ef0..ee64ed20 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 @@ -35,6 +35,7 @@ CRendererDRMPRIME::~CRendererDRMPRIME()
@@ -58,7 +58,7 @@ index 40556ef..ee64ed2 100644
 +  static_cast<CWinSystemGbm*>(CServiceBroker::GetWinSystem())->SetHwToneMapping(enable);
 +}
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
-index 11cb03d..5170dfe 100644
+index 11cb03de..5170dfeb 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 @@ -49,8 +49,12 @@ protected:
@@ -75,7 +75,7 @@ index 11cb03d..5170dfe 100644
  
    std::shared_ptr<CVideoLayerBridgeDRMPRIME> m_videoLayerBridge;
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
-index 644fd4b..6c2e92c 100644
+index 644fd4b3..6c2e92c4 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
 @@ -29,9 +29,12 @@
@@ -167,7 +167,7 @@ index 644fd4b..6c2e92c 100644
 +  CLog::LogF(LOGINFO, "HVS PQ tone mapping {}", enable ? "on" : "off");
 +}
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
-index 2105a76..92ff5aa 100644
+index 2105a767..92ff5aa8 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.h
 +++ b/xbmc/windowing/gbm/WinSystemGbm.h
 @@ -68,6 +68,10 @@ public:

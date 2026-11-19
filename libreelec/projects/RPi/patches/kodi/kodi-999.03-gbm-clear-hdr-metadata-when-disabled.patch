@@ -1,4 +1,4 @@
-From c50f68638a6b5652c85163e0f4f2b3d7d9b3d84c Mon Sep 17 00:00:00 2001
+From 1bed0d3d786bfc8c67b0c9389bb3704ba2b1fa21 Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 09:23:47 +0000
 Subject: [PATCH] [GBM] Clear HDR metadata when HDR display mode is turned off
@@ -19,7 +19,7 @@ because the curve outputs BT.709.
  3 files changed, 64 insertions(+), 30 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
-index cb124fa..792c1b5 100644
+index cb124fa8..792c1b50 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
 @@ -117,26 +117,10 @@ bool CRendererDRMPRIME::Configure(const VideoPicture& picture, float fps, unsign
@@ -136,7 +136,7 @@ index cb124fa..792c1b5 100644
 +  winSystem->SetHwToneMapping(enable);
  }
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
-index 291ef6c..30e3de2 100644
+index 291ef6ce..30e3de25 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.h
 @@ -8,6 +8,7 @@
@@ -163,7 +163,7 @@ index 291ef6c..30e3de2 100644
    bool m_toneMappingAllowed = false;
    bool m_hwToneMapping = false;
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
-index 6c2e92c..95ad05b 100644
+index 6c2e92c4..95ad05b3 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
 @@ -547,8 +547,13 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)

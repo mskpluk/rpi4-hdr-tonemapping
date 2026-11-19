@@ -8,10 +8,9 @@ OSD and subtitles through the inverse of the curve, so they still look like
 SDR.
 
 **Development build.** LibreELEC 13 has not been released yet; the latest
-release is 12.2.1. This is built from LibreELEC master of 6 November 2026,
-the same code as the LibreELEC 13 nightlies, with Kodi 22 from the Piers
-branch, after 22.0 RC1 and before the final release. Expect the bugs of a
-development version.
+release is 12.2.1. This is built from LibreELEC master of 14 November
+2026, the same code as the LibreELEC 13 nightlies, with Kodi 22.0 RC2.
+Expect the bugs of a development version.
 
 Tested on a Raspberry Pi 4 Model B with a Samsung S85F, at 1080p and 4K. All
 15 HDR test files (HDR10, HDR10+, Dolby Vision with an HDR10 base layer and
@@ -172,9 +171,6 @@ Opt-in: nothing changes unless `vc4.hvs5_pq=1` is on the kernel command line.
 6. **[GUI] Reload the skin when the screen aspect ratio changes.** See
    below.
 7. **[GBM] Update the resolutions on display hotplug.** See below.
-8. **UPnP: fix serving files after the path traversal fix.** Backport of
-   [xbmc/xbmc#30351](https://github.com/xbmc/xbmc/pull/30351), unrelated to
-   HDR.
 
 ### What was wrong in Kodi's HDR handling
 
@@ -201,11 +197,13 @@ device, not just the Pi.
   squashed into the top three quarters of the screen
   ([#25875](https://github.com/xbmc/xbmc/issues/25875)). The skin is now
   reloaded once the aspect ratio has settled for 500 ms, except during
-  screen calibration; a change during video playback is picked up when
-  playback stops. While an add-on window or dialog is open, the reload
+  screen calibration; a window resized during video playback is picked up
+  when playback stops. While an add-on window or dialog is open, the reload
   waits until it closes, as it would empty what the add-on filled in from
-  code. Submitted upstream as
-  [xbmc/xbmc#30385](https://github.com/xbmc/xbmc/pull/30385).
+  code. Merged upstream in
+  [xbmc/xbmc#30385](https://github.com/xbmc/xbmc/pull/30385) and in Piers
+  in [xbmc/xbmc#30493](https://github.com/xbmc/xbmc/pull/30493), after
+  22.0 RC2, so the patch here is that backport.
 - **No display hotplug on GBM.** A TV in standby can return an all-zero EDID.
   The Samsung S85F does, and Kodi then only gets the VESA fallback modes. When
   the TV wakes, the kernel reads the EDID and sends a hotplug uevent, but
@@ -400,22 +398,21 @@ These are unofficial builds. They are not supported by the LibreELEC team.
 
 ### Building
 
-The patches were made for LibreELEC.tv master `a0fa50bc6e` (6 November
-2026): Linux 6.18.60 (raspberrypi/linux `0b41724521c9`) and Kodi
-`c0718c9a69c4` (Piers). The `libreelec/` directory mirrors the LibreELEC.tv
-tree:
+The patches were made for LibreELEC.tv master `3a98afddff` (14 November
+2026): Linux 6.18.62 (raspberrypi/linux `ef71464298cd`) and Kodi 22.0 RC2
+(`22.0rc2-Piers`). The `libreelec/` directory mirrors the LibreELEC.tv tree:
 
 ```sh
 git clone https://github.com/LibreELEC/LibreELEC.tv
 cd LibreELEC.tv
-git checkout a0fa50bc6e
+git checkout 3a98afddff
 cp -r ../rpi4-hdr-tonemapping/libreelec/* .
 PROJECT=RPi DEVICE=RPi4 ARCH=aarch64 make image
 ```
 
-The Kodi patches are named `kodi-998.xx` and `kodi-999.xx` so that they sort
-after LibreELEC's own Raspberry Pi patches in the same directory, which
-they depend on.
+The Kodi patches are named `kodi-999.xx` so that they sort after
+LibreELEC's own Raspberry Pi patches in the same directory, which they
+depend on.
 
 ## Repository layout
 

@@ -1,4 +1,4 @@
-From 3d4f456a16541c3cf1fc239c69e6c2ad6e0bc30a Mon Sep 17 00:00:00 2001
+From 8b673b280b11543dac1f441679c160eaf04eea4f Mon Sep 17 00:00:00 2001
 From: Marcin <91057909+mskpluk@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 11:53:16 +0000
 Subject: [PATCH] [guilib][GLES] Keep GUI translucency in HDR compositing
@@ -13,7 +13,7 @@ instead of with squared alpha.
  3 files changed, 18 insertions(+), 21 deletions(-)
 
 diff --git a/system/shaders/GLES/2.0/gles_gui_composite.frag b/system/shaders/GLES/2.0/gles_gui_composite.frag
-index 2076418..fe4754f 100644
+index 2076418b..fe4754f6 100644
 --- a/system/shaders/GLES/2.0/gles_gui_composite.frag
 +++ b/system/shaders/GLES/2.0/gles_gui_composite.frag
 @@ -35,10 +35,14 @@ void main()
@@ -46,7 +46,7 @@ index 2076418..fe4754f 100644
  
    // BT.709 -> BT.2020 gamut mapping
 diff --git a/xbmc/guilib/GUIFontTTFGLES.cpp b/xbmc/guilib/GUIFontTTFGLES.cpp
-index 6554740..25c7a38 100644
+index 6554740f..25c7a38f 100644
 --- a/xbmc/guilib/GUIFontTTFGLES.cpp
 +++ b/xbmc/guilib/GUIFontTTFGLES.cpp
 @@ -126,17 +126,10 @@ bool CGUIFontTTFGLES::FirstBegin()
@@ -71,7 +71,7 @@ index 6554740..25c7a38 100644
      glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_ONE);
    glEnable(GL_BLEND);
 diff --git a/xbmc/guilib/GUITextureGLES.cpp b/xbmc/guilib/GUITextureGLES.cpp
-index a55365e..0b5d12f 100644
+index a55365e4..0b5d12f8 100644
 --- a/xbmc/guilib/GUITextureGLES.cpp
 +++ b/xbmc/guilib/GUITextureGLES.cpp
 @@ -119,13 +119,9 @@ void CGUITextureGLES::Begin(KODI::UTILS::COLOR::Color color)
